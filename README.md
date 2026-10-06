@@ -18,6 +18,23 @@ Small, fast remote desktop: control your Windows PC from your Android phone.
 | Zoom | Pinch to zoom in on small text |
 | Quality | High / Balanced / Data saver |
 
+### On-screen buttons
+
+Game-style buttons sit over the picture (move them with ☰ → **Edit layout**):
+
+| Button | What it does |
+|---|---|
+| **L / M / R** | Left, middle, right mouse button. Hold one and drag with another finger to drag things. |
+| **Wheel** (▲ ≡ ▼) | Drag up/down like a mouse wheel, or tap the top/bottom for one step. |
+| **+ / − / Fit** | Zoom in/out around the pointer, or back to the whole screen. |
+| **⌨** | Phone keyboard. |
+| **Hold** | Keeps the left button pressed until you tap it again (easy dragging). |
+| **Hide / Show** | Hides the buttons for a clean view. |
+
+**Settings** (on the main screen, or ☰ → Settings): control mode, pointer speed and size, tap to
+click, scroll speed and direction, button size and visibility, left-handed layout, vibration,
+quality and sound.
+
 ### Gestures (Trackpad mode)
 
 | Do this | Get this |

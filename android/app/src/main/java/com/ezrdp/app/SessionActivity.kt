@@ -23,6 +23,9 @@ class SessionActivity : Activity(), ConnectionListener {
     private lateinit var remote: RemoteView
     private lateinit var keyInput: KeyInput
     private lateinit var status: TextView
+    private lateinit var settings: Settings
+    private lateinit var controls: Controls
+    private lateinit var doneEditing: TextView
     private lateinit var statusBox: View
     private lateinit var toolbar: View
     private lateinit var keysBar: View
@@ -59,9 +62,7 @@ class SessionActivity : Activity(), ConnectionListener {
         pc = saved
         liveHost = intent.getStringExtra("liveHost")
         port = intent.getIntExtra("livePort", pc.port)
-        val prefs = getSharedPreferences("ezrdp", MODE_PRIVATE)
-        quality = prefs.getInt("quality", 1)
-        soundOn = prefs.getBoolean("sound", false)
+        settings = Settings(this)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -73,7 +74,6 @@ class SessionActivity : Activity(), ConnectionListener {
         root.setBackgroundColor(Color.BLACK)
 
         remote = RemoteView(this) { conn }
-        remote.trackpad = prefs.getBoolean("trackpad", true)
         remote.onSurface = { decoder.setSurface(it) }
         remote.onAction = { releaseModifiers() }
         root.addView(remote, FrameLayout.LayoutParams(-1, -1))
@@ -81,7 +81,13 @@ class SessionActivity : Activity(), ConnectionListener {
         keyInput = KeyInput(this, { conn }) { releaseModifiers() }
         root.addView(keyInput, FrameLayout.LayoutParams(1, 1))
 
+        controls = Controls(this, root, remote, { conn }, { keyInput.show() }) { releaseModifiers() }
+        root.addOnLayoutChangeListener { _, l, t, r, b, ol, ot, or, ob ->
+            if (r - l != or - ol || b - t != ob - ot) root.post { controls.relayout() }
+        }
+
         status = TextView(this).apply {
+            maxWidth = dp(300)
             setTextColor(Color.WHITE)
             textSize = 16f
             gravity = Gravity.CENTER
@@ -91,7 +97,7 @@ class SessionActivity : Activity(), ConnectionListener {
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(dp(24), dp(16), dp(24), dp(14))
             background = rounded(0xDD202228.toInt(), dp(12).toFloat())
-            addView(status)
+            addView(status, LinearLayout.LayoutParams(-2, -2))
             addView(pill("Cancel") { finish() }, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(12) })
         }
         root.addView(statusBox, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
@@ -104,11 +110,20 @@ class SessionActivity : Activity(), ConnectionListener {
         keysBar = buildKeysBar()
         toolbar.visibility = View.GONE
         keysBar.visibility = View.GONE
-        val handle = pill("☰") { toggle(toolbar) }.apply { alpha = 0.55f }
-        bars.addView(handle)
+        val handle = pill("☰") { toggle(toolbar) }.apply { alpha = 0.7f }
+        bars.addView(handle, LinearLayout.LayoutParams(-2, -2))
         bars.addView(toolbar)
         bars.addView(keysBar)
         root.addView(bars, FrameLayout.LayoutParams(-1, -2, Gravity.TOP).apply { topMargin = dp(4) })
+
+        doneEditing = pill("Done moving buttons") {
+            controls.setEditing(false)
+            doneEditing.visibility = View.GONE
+        }.apply {
+            visibility = View.GONE
+            setActive(true)
+        }
+        root.addView(doneEditing, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
 
         setContentView(root)
         hideSystemBars()
@@ -134,8 +149,9 @@ class SessionActivity : Activity(), ConnectionListener {
             pill("Screen") { pickMonitor() },
             soundBtn,
             modeBtn,
-            pill("Zoom 1x") { remote.resetZoom() },
             pill("Quality") { pickQuality() },
+            pill("Edit layout") { editLayout() },
+            pill("Settings") { startActivity(android.content.Intent(this, SettingsActivity::class.java)) },
             pill("Exit") { finish() },
         )
     }
@@ -166,11 +182,28 @@ class SessionActivity : Activity(), ConnectionListener {
             key("PgUp", VK.PGUP),
             key("PgDn", VK.PGDN),
             key("PrtSc", VK.PRTSC),
+            pill("Copy") { combo(VK.CTRL, 'C'.code) },
+            pill("Paste") { combo(VK.CTRL, 'V'.code) },
+            pill("Cut") { combo(VK.CTRL, 'X'.code) },
+            pill("Undo") { combo(VK.CTRL, 'Z'.code) },
+            pill("Redo") { combo(VK.CTRL, 'Y'.code) },
+            pill("Select all") { combo(VK.CTRL, 'A'.code) },
             pill("Task Mgr") { combo(VK.CTRL, VK.SHIFT, VK.ESC) },
             pill("Alt+Tab") { combo(VK.ALT, VK.TAB) },
             pill("Desktop") { combo(VK.WIN, 'D'.code) },
             *fkeys.toTypedArray(),
         )
+    }
+
+    private fun editLayout() {
+        if (!settings.showControls) {
+            settings.showControls = true
+            controls.build()
+        }
+        toolbar.visibility = View.GONE
+        keysBar.visibility = View.GONE
+        controls.setEditing(true)
+        doneEditing.visibility = View.VISIBLE
     }
 
     private fun combo(vararg keys: Int) {
@@ -204,7 +237,7 @@ class SessionActivity : Activity(), ConnectionListener {
     private fun toggleMode() {
         remote.trackpad = !remote.trackpad
         modeBtn.text = if (remote.trackpad) "Trackpad" else "Touch"
-        getSharedPreferences("ezrdp", MODE_PRIVATE).edit().putBoolean("trackpad", remote.trackpad).apply()
+        settings.trackpad = remote.trackpad
     }
 
     private fun setSound(on: Boolean) {
@@ -212,7 +245,7 @@ class SessionActivity : Activity(), ConnectionListener {
         soundBtn.setActive(on)
         conn?.setAudio(on)
         if (!on) audio.release()
-        getSharedPreferences("ezrdp", MODE_PRIVATE).edit().putBoolean("sound", on).apply()
+        settings.sound = on
     }
 
     private fun pickMonitor() {
@@ -238,7 +271,7 @@ class SessionActivity : Activity(), ConnectionListener {
             .setSingleChoiceItems(labels, quality) { d, i ->
                 quality = i
                 conn?.setQuality(i)
-                getSharedPreferences("ezrdp", MODE_PRIVATE).edit().putInt("quality", i).apply()
+                settings.quality = i
                 d.dismiss()
             }
             .show()
@@ -272,6 +305,13 @@ class SessionActivity : Activity(), ConnectionListener {
     override fun onStart() {
         super.onStart()
         if (!::pc.isInitialized) return
+        // Pick up changes made in Settings.
+        quality = settings.quality
+        soundOn = settings.sound
+        remote.apply(settings)
+        modeBtn.text = if (remote.trackpad) "Trackpad" else "Touch"
+        soundBtn.setActive(soundOn)
+        controls.build()
         running = true
         attempt = 0
         connect()
@@ -428,6 +468,7 @@ class SessionActivity : Activity(), ConnectionListener {
             gotFrame = false
             heldModifiers.clear()
             modifierButtons.values.forEach { it.setActive(false) }
+            controls.release()
             if (running) retry()
         }
     }

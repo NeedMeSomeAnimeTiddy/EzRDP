@@ -32,6 +32,23 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
     /** Called after any click or key, so one-shot modifier keys can be released. */
     var onAction: () -> Unit = {}
     var trackpad = true
+    var pointerSpeed = 1f
+    var scrollSpeed = 1f
+    var invertScroll = false
+    var tapToClick = true
+    var cursorScale = 1f
+    var haptics = true
+
+    fun apply(st: Settings) {
+        trackpad = st.trackpad
+        pointerSpeed = st.pointerSpeed
+        scrollSpeed = st.scrollSpeed
+        invertScroll = st.invertScroll
+        tapToClick = st.tapToClick
+        cursorScale = st.cursorSize
+        haptics = st.haptics
+        invalidate()
+    }
 
     private val texture = TextureView(context)
     private var surface: Surface? = null
@@ -114,6 +131,18 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
         applyTransform()
     }
 
+    /** Zooms in or out by [factor], keeping the mouse pointer where it is on screen. */
+    fun zoomBy(factor: Float) {
+        if (videoW == 0) return
+        val px = tx + cursorX * scale
+        val py = ty + cursorY * scale
+        zoom = (zoom * factor).coerceIn(1f, 6f)
+        val sc = min(width.toFloat() / videoW, height.toFloat() / videoH) * zoom
+        centerX = (width / 2f - (px - cursorX * sc)) / sc
+        centerY = (height / 2f - (py - cursorY * sc)) / sc
+        applyTransform()
+    }
+
     private fun applyTransform() {
         val w = width.toFloat()
         val h = height.toFloat()
@@ -165,7 +194,7 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
         if (videoW == 0 || !cursorVisible) return
         canvas.save()
         canvas.translate(tx + cursorX * scale, ty + cursorY * scale)
-        val s = dp * 1.1f
+        val s = dp * 1.1f * cursorScale
         canvas.scale(s, s)
         canvas.drawPath(arrow, fill)
         canvas.drawPath(arrow, stroke)
@@ -207,7 +236,7 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
         longPressed = true
         if (!trackpad) moveAbsTo(downX, downY)
         conn()?.click(1)
-        performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+        if (haptics) performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
         onAction()
     }
 
@@ -224,7 +253,7 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
         if (videoW == 0) return
         // Faster finger = bigger jump, slow finger = precise.
         val dist = hypot(dxPx, dyPx) / dp
-        val accel = 0.9f + min(dist / 12f, 1.8f)
+        val accel = (0.9f + min(dist / 12f, 1.8f)) * pointerSpeed
         val dx = dxPx / scale * accel
         val dy = dyPx / scale * accel
         val nx = (cursorX + dx).coerceIn(0f, videoW - 1f)
@@ -245,7 +274,7 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
                 downTime = SystemClock.uptimeMillis()
                 moved = false; longPressed = false; multi = false; dragging = false
                 two = Two.NONE
-                if (trackpad) {
+                if (trackpad && tapToClick) {
                     val quick = downTime - lastTapTime < 280
                     if (quick && hypot(e.x - lastTapX, e.y - lastTapY) < 50 * dp) {
                         // Tap then hold: press the button and drag.
@@ -303,7 +332,7 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
                     dragging = false
                     onAction()
                     lastTapTime = 0
-                } else if (!moved && !multi && !longPressed && now - downTime < 300) {
+                } else if (!moved && !multi && !longPressed && now - downTime < 300 && (tapToClick || !trackpad)) {
                     conn()?.click(0)
                     onAction()
                     lastTapTime = now; lastTapX = e.x; lastTapY = e.y
@@ -361,8 +390,9 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
             }
             Two.SCROLL -> {
                 // 30 dp of finger travel = one mouse-wheel notch (120). Content follows the fingers.
-                scrollAccY += (fy - lastFocusY) / dp * 4f
-                scrollAccX += -(fx - lastFocusX) / dp * 4f
+                val dir = if (invertScroll) -1f else 1f
+                scrollAccY += (fy - lastFocusY) / dp * 4f * scrollSpeed * dir
+                scrollAccX += -(fx - lastFocusX) / dp * 4f * scrollSpeed * dir
                 val sy = scrollAccY.toInt()
                 val sx = scrollAccX.toInt()
                 if (sy != 0 || sx != 0) {

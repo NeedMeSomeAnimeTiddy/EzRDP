@@ -40,12 +40,15 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(44), dp(20), dp(24))
         }
-        col.addView(TextView(this).apply {
+        val header = LinearLayout(this).apply { gravity = android.view.Gravity.CENTER_VERTICAL }
+        header.addView(TextView(this).apply {
             text = "EzRDP"
             textSize = 34f
             setTextColor(Color.WHITE)
             paint.isFakeBoldText = true
-        })
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        header.addView(pill("⚙  Settings") { startActivity(Intent(this, SettingsActivity::class.java)) })
+        col.addView(header)
         col.addView(TextView(this).apply {
             text = "Control your PC from your phone."
             textSize = 15f
