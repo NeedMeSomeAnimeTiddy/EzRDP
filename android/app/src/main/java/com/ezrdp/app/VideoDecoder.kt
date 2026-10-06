@@ -17,6 +17,17 @@ class VideoDecoder(private val requestKeyframe: () -> Unit) {
     private var height = 0
     private var outputThread: Thread? = null
     private var lastKeyRequest = 0L
+    /** Biggest frame the input buffers were sized for; bigger frames restart the decoder. */
+    private var inputSize = 0
+    private var startedAt = 0L
+    private var fed = 0
+    @Volatile private var shown = 0
+    private var stuckReported = false
+
+    /** Called (on the decoder's thread) when the first picture of a stream is on screen. */
+    var onPicture: () -> Unit = {}
+    /** Called when the decoder takes video but never shows anything (e.g. too big for this phone). */
+    var onStuck: () -> Unit = {}
 
     @Synchronized
     fun setSurface(s: Surface?) {
@@ -32,10 +43,11 @@ class VideoDecoder(private val requestKeyframe: () -> Unit) {
         release()
         width = w
         height = h
+        stuckReported = false
     }
 
     @Synchronized
-    fun decode(data: ByteArray, offset: Int, length: Int, keyframe: Boolean) {
+    fun decode(data: ByteArray, offset: Int, length: Int, keyframe: Boolean, retry: Boolean = true) {
         val s = surface ?: return
         if (codec == null) {
             if (!keyframe || width == 0) {
@@ -45,6 +57,27 @@ class VideoDecoder(private val requestKeyframe: () -> Unit) {
             codec = start(s, data, offset, length) ?: return
         }
         val c = codec ?: return
+        if (length > inputSize && retry) {
+            // Frame bigger than the decoder's buffers (sharp keyframes can be): restart bigger.
+            Log.i(TAG, "frame of $length bytes; restarting decoder with bigger buffers")
+            release()
+            if (keyframe) {
+                inputSize = length * 2
+                codec = start(s, data, offset, length) ?: return
+                decode(data, offset, length, keyframe, retry = false)
+            } else {
+                inputSize = length * 2
+                askForKeyframe()
+            }
+            return
+        }
+        if (fed > 20 && shown == 0 && !stuckReported &&
+            System.currentTimeMillis() - startedAt > 2500
+        ) {
+            stuckReported = true
+            Log.w(TAG, "decoder took $fed frames but showed nothing")
+            onStuck()
+        }
         try {
             val index = c.dequeueInputBuffer(30_000)
             if (index < 0) {
@@ -53,9 +86,20 @@ class VideoDecoder(private val requestKeyframe: () -> Unit) {
                 return
             }
             val buf = c.getInputBuffer(index) ?: return
+            if (buf.capacity() < length) {
+                c.queueInputBuffer(index, 0, 0, 0, 0)
+                if (retry) {
+                    inputSize = buf.capacity()
+                    decode(data, offset, length, keyframe)
+                } else {
+                    askForKeyframe()
+                }
+                return
+            }
             buf.clear()
             buf.put(data, offset, length)
             c.queueInputBuffer(index, 0, length, System.nanoTime() / 1000, 0)
+            fed++
         } catch (e: Exception) {
             Log.w(TAG, "decode failed, restarting decoder", e)
             release()
@@ -83,9 +127,11 @@ class VideoDecoder(private val requestKeyframe: () -> Unit) {
             val f = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)
             f.setByteBuffer("csd-0", java.nio.ByteBuffer.wrap(data, sps.start, sps.end - sps.start).slice())
             f.setByteBuffer("csd-1", java.nio.ByteBuffer.wrap(data, pps.start, pps.end - pps.start).slice())
-            f.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, width * height)
+            f.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, inputSize)
             if (lowLatency) {
                 f.setInteger(MediaFormat.KEY_PRIORITY, 0)
+                // Run the decoder at full speed instead of a power-saving pace.
+                f.setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     f.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
                 }
@@ -97,6 +143,10 @@ class VideoDecoder(private val requestKeyframe: () -> Unit) {
             }
             return f
         }
+        inputSize = maxOf(inputSize, width * height * 2, length * 2, 1 shl 20)
+        fed = 0
+        shown = 0
+        startedAt = System.currentTimeMillis()
         // Some phones refuse the low-latency settings; fall back to plain decoding.
         for (lowLatency in listOf(true, false)) {
             var c: MediaCodec? = null
@@ -121,7 +171,10 @@ class VideoDecoder(private val requestKeyframe: () -> Unit) {
         try {
             while (!Thread.currentThread().isInterrupted) {
                 val index = c.dequeueOutputBuffer(info, 20_000)
-                if (index >= 0) c.releaseOutputBuffer(index, true)
+                if (index >= 0) {
+                    c.releaseOutputBuffer(index, true)
+                    if (shown++ == 0) onPicture()
+                }
             }
         } catch (_: Exception) {
             // Codec was released.
@@ -165,5 +218,28 @@ class VideoDecoder(private val requestKeyframe: () -> Unit) {
 
     companion object {
         private const val TAG = "EzRDP"
+
+        /**
+         * Biggest landscape picture this phone's H.264 decoder can play at 60 fps (0,0 if unknown).
+         * The PC never sends anything bigger.
+         */
+        fun maxSize(): Pair<Int, Int> {
+            try {
+                val list = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS)
+                val decoders = list.codecInfos.filter { info ->
+                    !info.isEncoder && info.supportedTypes.any { it.equals(MediaFormat.MIMETYPE_VIDEO_AVC, true) }
+                }
+                // Prefer the hardware decoder (the one the system picks first that isn't software).
+                val best = decoders.firstOrNull { !it.name.startsWith("OMX.google") && !it.name.startsWith("c2.android") }
+                    ?: decoders.firstOrNull() ?: return 0 to 0
+                val caps = best.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC).videoCapabilities
+                for ((w, h) in listOf(3840 to 2160, 2560 to 1600, 2560 to 1440, 1920 to 1200, 1920 to 1080, 1280 to 720)) {
+                    if (caps.areSizeAndRateSupported(w, h, 60.0) || caps.areSizeAndRateSupported(w, h, 30.0)) return w to h
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "couldn't read decoder limits", e)
+            }
+            return 0 to 0
+        }
     }
 }

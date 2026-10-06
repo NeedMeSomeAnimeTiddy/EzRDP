@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use crate::crypto::{Seal, TAG};
 
-pub const VERSION: u8 = 3;
+pub const VERSION: u8 = 4;
 pub const DEFAULT_PORT: u16 = 7270;
 
 // Server -> client
@@ -26,7 +26,7 @@ pub const S_PAIR_KEY: u8 = 0x0B; // PC public key [65]
 pub const S_PAIR_RESULT: u8 = 0x0C; // RESULT_* u8, then device id [16] if ok
 
 // Client -> server
-pub const C_AUTH: u8 = 0x81; // device id [16], nonce [16], proof [32], quality u8
+pub const C_AUTH: u8 = 0x81; // device id [16], nonce [16], proof [32], quality u8, role u8, max w u16, max h u16, flags u8 (1 = graphics-card encoder ok)
 pub const C_MOUSE_ABS: u8 = 0x82; // x f32, y f32 (0..1 of monitor)
 pub const C_MOUSE_REL: u8 = 0x83; // dx f32, dy f32 (fraction of monitor width/height)
 pub const C_MOUSE_BUTTON: u8 = 0x84; // button u8 (0 left, 1 right, 2 middle), down u8
@@ -42,6 +42,24 @@ pub const C_PING: u8 = 0x8D; // (empty)
 pub const C_PAIR_START: u8 = 0x8E; // commitment [32], phone name utf8
 pub const C_PAIR_KEY: u8 = 0x8F; // phone public key [65]
 
+// Phone sharing its own screen (role 1). Phone -> PC:
+pub const P_SCREEN_CONFIG: u8 = 0x90; // video w u16, video h u16
+pub const P_SCREEN_FRAME: u8 = 0x91; // frame id u32, keyframe u8, h264 annex-b data
+// PC -> phone:
+pub const S_TOUCH: u8 = 0x20; // action u8 (0 down, 1 move, 2 up), x f32, y f32 (0..1 of the phone screen)
+pub const S_NAV: u8 = 0x21; // NAV_* u8
+pub const S_TYPE: u8 = 0x22; // utf8 text to type into the focused box
+pub const S_SWIPE: u8 = 0x23; // x f32, y f32, dx f32, dy f32 (scroll-wheel swipes)
+pub const S_FRAME_ACK: u8 = 0x24; // frame id u32
+pub const S_KEYFRAME: u8 = 0x25; // (empty) please send a full picture
+
+pub const NAV_BACK: u8 = 0;
+pub const NAV_HOME: u8 = 1;
+pub const NAV_RECENTS: u8 = 2;
+pub const NAV_NOTIFICATIONS: u8 = 3;
+pub const NAV_BACKSPACE: u8 = 4;
+pub const NAV_ENTER: u8 = 5;
+
 pub const RESULT_DENIED: u8 = 0; // wrong/untrusted phone, or user clicked Deny
 pub const RESULT_OK: u8 = 1;
 pub const RESULT_PAUSED: u8 = 2;
@@ -49,6 +67,8 @@ pub const RESULT_NOT_LOCAL: u8 = 3; // pairing only works on the home network
 pub const RESULT_BUSY: u8 = 4; // another phone is pairing right now
 
 const MAX_CLIENT_MSG: usize = 64 * 1024;
+/// Video from a phone sharing its screen can be much bigger.
+const MAX_VIDEO_MSG: usize = 8 * 1024 * 1024;
 
 /// Reads a plain (login) message.
 pub fn read_msg(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
@@ -75,18 +95,24 @@ pub fn write_plain(w: &mut impl Write, kind: u8, payload: &[u8]) -> io::Result<(
 pub struct Receiver<R> {
     pub reader: R,
     seal: Seal,
+    max: usize,
 }
 
 impl<R: Read> Receiver<R> {
     pub fn new(reader: R, seal: Seal) -> Self {
-        Self { reader, seal }
+        Self { reader, seal, max: MAX_CLIENT_MSG }
+    }
+
+    /// For a phone sending video.
+    pub fn new_video(reader: R, seal: Seal) -> Self {
+        Self { reader, seal, max: MAX_VIDEO_MSG }
     }
 
     pub fn read(&mut self) -> io::Result<(u8, Vec<u8>)> {
         let mut len = [0u8; 4];
         self.reader.read_exact(&mut len)?;
         let len = u32::from_be_bytes(len) as usize;
-        if !(TAG + 1..=MAX_CLIENT_MSG).contains(&len) {
+        if !(TAG + 1..=self.max).contains(&len) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "bad message size"));
         }
         let mut buf = vec![0u8; len];

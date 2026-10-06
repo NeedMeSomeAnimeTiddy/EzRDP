@@ -7,4 +7,11 @@
         <item name="android:statusBarColor">#101114</item>
         <item name="android:navigationBarColor">#101114</item>
     </style>
+
+    <!-- Settings opened during a session: see-through window, so the session underneath
+         keeps running instead of disconnecting. The page itself draws its own background. -->
+    <style name="Theme.EzRDP.Overlay" parent="Theme.EzRDP">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+    </style>
 </resources>

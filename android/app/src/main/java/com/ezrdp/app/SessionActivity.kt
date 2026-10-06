@@ -18,11 +18,17 @@ import android.widget.TextView
 import android.os.Build
 
 class SessionActivity : Activity(), ConnectionListener {
+    companion object {
+        /** Biggest picture this phone can decode; looked up once. */
+        val decoderLimit: Pair<Int, Int> by lazy { VideoDecoder.maxSize() }
+    }
+
     private val ui = Handler(Looper.getMainLooper())
     @Volatile private var conn: Connection? = null
     private lateinit var remote: RemoteView
     private lateinit var keyInput: KeyInput
     private lateinit var status: TextView
+    private lateinit var statusButton: TextView
     private lateinit var settings: Settings
     private lateinit var controls: Controls
     private lateinit var doneEditing: TextView
@@ -34,7 +40,10 @@ class SessionActivity : Activity(), ConnectionListener {
     private val modifierButtons = HashMap<Int, TextView>()
     private val heldModifiers = HashSet<Int>()
 
-    private val decoder = VideoDecoder { conn?.requestKeyframe() }
+    private val decoder = VideoDecoder { conn?.requestKeyframe() }.also { d ->
+        d.onPicture = { ui.post { if (conn != null) showStatus(null) } }
+        d.onStuck = { ui.post { pictureStuck() } }
+    }
     private val audio = AudioPlayer()
 
     private lateinit var store: PcStore
@@ -42,6 +51,7 @@ class SessionActivity : Activity(), ConnectionListener {
     private var liveHost: String? = null
     private var port = 7270
     private var quality = 1
+    private var gpuEncoder = true
     private var soundOn = false
     private var monitors: List<MonitorInfo> = emptyList()
     private var currentMonitor = 0
@@ -86,19 +96,42 @@ class SessionActivity : Activity(), ConnectionListener {
             if (r - l != or - ol || b - t != ob - ot) root.post { controls.relayout() }
         }
 
+        // Messages (connecting, errors) in a box that always fits: it never gets wider than the
+        // screen, and long text scrolls inside it.
         status = TextView(this).apply {
-            maxWidth = dp(300)
             setTextColor(Color.WHITE)
             textSize = 16f
             gravity = Gravity.CENTER
+            setLineSpacing(0f, 1.15f)
         }
-        statusBox = LinearLayout(this).apply {
+        statusButton = pill("Cancel") { finish() }
+        statusBox = object : LinearLayout(this) {
+            override fun onMeasure(w: Int, h: Int) {
+                val parentW = View.MeasureSpec.getSize(w)
+                val parentH = View.MeasureSpec.getSize(h)
+                val maxW = minOf(dp(380), parentW - dp(32))
+                val maxH = parentH - dp(32)
+                super.onMeasure(
+                    View.MeasureSpec.makeMeasureSpec(maxW.coerceAtLeast(dp(120)), View.MeasureSpec.AT_MOST),
+                    View.MeasureSpec.makeMeasureSpec(maxH.coerceAtLeast(dp(120)), View.MeasureSpec.AT_MOST),
+                )
+            }
+        }.apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(24), dp(16), dp(24), dp(14))
-            background = rounded(0xDD202228.toInt(), dp(12).toFloat())
-            addView(status, LinearLayout.LayoutParams(-2, -2))
-            addView(pill("Cancel") { finish() }, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(12) })
+            setPadding(dp(22), dp(16), dp(22), dp(14))
+            background = rounded(0xEE202228.toInt(), dp(14).toFloat())
+            // Leaves room for the button below, however long the message is.
+            addView(object : android.widget.ScrollView(context) {
+                override fun onMeasure(w: Int, h: Int) {
+                    val room = (root.height - dp(130)).coerceAtLeast(dp(80))
+                    super.onMeasure(w, View.MeasureSpec.makeMeasureSpec(room, View.MeasureSpec.AT_MOST))
+                }
+            }.apply {
+                isVerticalScrollBarEnabled = false
+                addView(status)
+            }, LinearLayout.LayoutParams(-2, -2))
+            addView(statusButton, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(12) })
         }
         root.addView(statusBox, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
 
@@ -142,7 +175,7 @@ class SessionActivity : Activity(), ConnectionListener {
 
     private fun buildToolbar(): View {
         soundBtn = pill("Sound") { setSound(!soundOn) }.also { it.setActive(soundOn) }
-        modeBtn = pill(if (remote.trackpad) "Trackpad" else "Touch") { toggleMode() }
+        modeBtn = pill(modeLabel()) { toggleMode() }
         return scrollRow(
             pill("Keyboard") { keyInput.show() },
             pill("Keys") { toggle(keysBar) },
@@ -234,10 +267,18 @@ class SessionActivity : Activity(), ConnectionListener {
         if (v == toolbar && v.visibility == View.GONE) keysBar.visibility = View.GONE
     }
 
+    private fun modeLabel() = "Mode: " + Settings.MODE_NAMES[remote.mode]
+
+    /** Cycles Both → Trackpad → Touch. */
     private fun toggleMode() {
-        remote.trackpad = !remote.trackpad
-        modeBtn.text = if (remote.trackpad) "Trackpad" else "Touch"
-        settings.trackpad = remote.trackpad
+        remote.mode = (remote.mode + 1) % 3
+        settings.mouseMode = remote.mode
+        modeBtn.text = modeLabel()
+        android.widget.Toast.makeText(this, when (remote.mode) {
+            Settings.MODE_TRACKPAD -> "Trackpad: drag moves the pointer, tap clicks where it is"
+            Settings.MODE_TOUCH -> "Touch: the pointer follows your finger"
+            else -> "Both: tap to click there, drag to move the pointer"
+        }, android.widget.Toast.LENGTH_SHORT).show()
     }
 
     private fun setSound(on: Boolean) {
@@ -305,16 +346,34 @@ class SessionActivity : Activity(), ConnectionListener {
     override fun onStart() {
         super.onStart()
         if (!::pc.isInitialized) return
-        // Pick up changes made in Settings.
         quality = settings.quality
         soundOn = settings.sound
-        remote.apply(settings)
-        modeBtn.text = if (remote.trackpad) "Trackpad" else "Touch"
-        soundBtn.setActive(soundOn)
-        controls.build()
+        gpuEncoder = settings.gpuEncoder
         running = true
         attempt = 0
         connect()
+    }
+
+    /** Settings opens on top without disconnecting; pick up its changes when it closes. */
+    override fun onResume() {
+        super.onResume()
+        if (!::pc.isInitialized) return
+        remote.apply(settings)
+        modeBtn.text = modeLabel()
+        controls.build()
+        if (settings.quality != quality) {
+            quality = settings.quality
+            conn?.setQuality(quality)
+        }
+        if (settings.sound != soundOn) setSound(settings.sound)
+        if (settings.gpuEncoder != gpuEncoder) {
+            // Only takes effect on a new connection.
+            gpuEncoder = settings.gpuEncoder
+            conn?.close()
+            conn = null
+            decoder.release()
+            if (running) connect()
+        }
     }
 
     override fun onStop() {
@@ -331,28 +390,45 @@ class SessionActivity : Activity(), ConnectionListener {
         decoder.release()
     }
 
-    private fun showStatus(text: String?) {
+    private fun showStatus(text: String?, button: String = "Cancel") {
         status.text = text ?: ""
+        // Short messages centred; long ones (with bullet points) read better from the left.
+        status.gravity = if ((text ?: "").contains('•')) Gravity.START else Gravity.CENTER
+        statusButton.text = button
         statusBox.visibility = if (text == null) View.GONE else View.VISIBLE
+        statusBox.requestLayout()
     }
 
-    /** Addresses to try, best first: found on this Wi-Fi now, last home address, then internet. */
-    private fun targets(): List<Pair<String, Int>> {
-        val list = ArrayList<Pair<String, Int>>()
-        liveHost?.let { list.add(it to 6000) }
-        if (pc.home.isNotEmpty()) list.add(pc.home to 1200)
-        if (pc.manual.isNotEmpty()) list.add(pc.manual to 6000)
-        if (pc.internet.isNotEmpty()) list.add(pc.internet to 6000)
-        return list.distinctBy { it.first }
+    /** The decoder takes video but shows nothing: usually the picture is too big for this phone. */
+    private fun pictureStuck() {
+        val c = conn ?: return
+        if (quality < 2) {
+            quality++
+            c.setQuality(quality)
+            decoder.release()
+            android.widget.Toast.makeText(
+                this,
+                "The picture didn't show at that quality on this phone, so it was lowered.",
+                android.widget.Toast.LENGTH_LONG,
+            ).show()
+        } else if (gpuEncoder) {
+            android.widget.Toast.makeText(
+                this,
+                "Picture problem. Try turning off \"Use the PC's graphics card\" in Settings.",
+                android.widget.Toast.LENGTH_LONG,
+            ).show()
+        }
     }
 
     private fun connect() {
         showStatus(if (attempt == 0) "Connecting to ${pc.name}…" else "Reconnecting…")
         Thread {
             var lastError: Exception? = null
-            for ((addr, timeout) in targets()) {
+            val (maxW, maxH) = decoderLimit
+            val options = LoginOptions(quality, Msg.ROLE_CONTROL_PC, maxW, maxH, gpuEncoder)
+            for ((addr, timeout) in pc.addresses(liveHost)) {
                 if (!running) return@Thread
-                val c = Connection(addr, port, pc.id.fromHex(), pc.deviceId, pc.key, quality, this, timeout)
+                val c = Connection(addr, port, pc.id.fromHex(), pc.deviceId, pc.key, options, this, timeout)
                 try {
                     c.open()
                     ui.post {
@@ -363,6 +439,8 @@ class SessionActivity : Activity(), ConnectionListener {
                         conn = c
                         attempt = 0
                         everConnected = true
+                        // Fresh decoder, so "waiting" goes away when this connection's first picture shows.
+                        decoder.release()
                         showStatus("Waiting for picture…")
                         if (soundOn) c.setAudio(true)
                         chosenMonitor?.let { c.selectMonitor(it) }
@@ -407,12 +485,8 @@ class SessionActivity : Activity(), ConnectionListener {
 
     private fun fail(msg: String) {
         if (isFinishing) return
-        AlertDialog.Builder(this)
-            .setTitle("Couldn't connect")
-            .setMessage(msg)
-            .setPositiveButton("OK") { _, _ -> finish() }
-            .setOnCancelListener { finish() }
-            .show()
+        running = false
+        showStatus("Couldn't connect\n\n$msg", "OK")
     }
 
     // ---------- ConnectionListener (network thread) ----------
@@ -429,14 +503,8 @@ class SessionActivity : Activity(), ConnectionListener {
         }
     }
 
-    private var gotFrame = false
-
     override fun onVideoFrame(data: ByteArray, offset: Int, length: Int, keyframe: Boolean) {
         decoder.decode(data, offset, length, keyframe)
-        if (!gotFrame) {
-            gotFrame = true
-            ui.post { showStatus(null) }
-        }
     }
 
     override fun onCursor(x: Float, y: Float, visible: Boolean) {
@@ -465,7 +533,6 @@ class SessionActivity : Activity(), ConnectionListener {
         ui.post {
             if (conn == null) return@post
             conn = null
-            gotFrame = false
             heldModifiers.clear()
             modifierButtons.values.forEach { it.setActive(false) }
             controls.release()

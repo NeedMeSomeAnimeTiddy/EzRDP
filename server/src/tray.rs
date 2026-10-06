@@ -39,6 +39,11 @@ fn hwnd() -> HWND {
     HWND(WINDOW.load(Relaxed) as *mut _)
 }
 
+/// The EzRDP icon, for other windows.
+pub fn app_icon() -> HICON {
+    ICONS.get().map(|i| HICON(i.0 as *mut _)).unwrap_or_default()
+}
+
 /// Thread-safe: asks the tray to redraw its tooltip/icon.
 pub fn refresh() {
     unsafe {

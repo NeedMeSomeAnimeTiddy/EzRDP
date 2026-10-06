@@ -51,6 +51,14 @@ pub fn listen(app: Arc<App>, approve: Approve, run: RunSession) -> std::io::Resu
             let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
             let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
             match handshake(&mut stream, &app, &approve) {
+                Ok(Outcome::Session(login)) if login.role == 1 => {
+                    // The phone shares its own screen; this doesn't affect a phone controlling the PC.
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
+                    let name = login.device_name.clone();
+                    log!("Phone sharing its screen: {name} ({peer})");
+                    run(stream, *login, Vec::new(), app.clone());
+                    log!("Phone stopped sharing: {name}");
+                }
                 Ok(Outcome::Session(login)) => {
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
                     let id = NEXT_ID.fetch_add(1, Relaxed);

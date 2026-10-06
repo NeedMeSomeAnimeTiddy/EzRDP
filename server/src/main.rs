@@ -25,7 +25,11 @@ mod capture;
 #[cfg(windows)]
 mod firewall;
 #[cfg(windows)]
+mod hwenc;
+#[cfg(windows)]
 mod input;
+#[cfg(windows)]
+mod phone_view;
 #[cfg(windows)]
 mod session;
 #[cfg(windows)]
@@ -273,6 +277,10 @@ fn main() {
     });
 
     fn on_session(stream: std::net::TcpStream, l: login::Login, info: Vec<u8>, app: Arc<App>) {
+        if l.role == 1 {
+            phone_view::run(stream, l, app);
+            return;
+        }
         tray::notify("Phone connected", &format!("{} is now controlling this PC.", l.device_name));
         session::run(stream, l, info, app);
     }

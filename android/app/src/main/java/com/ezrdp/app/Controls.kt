@@ -33,9 +33,15 @@ class Controls(
     private var hidden = false
     var editing = false
         private set
+    private var builtPortrait = false
+    private val portrait get() = root.height > root.width
 
-    /** A movable group of buttons. Default spot is given as fractions of the free space. */
-    private inner class Group(val key: String, val defX: Float, val defY: Float, vertical: Boolean) : LinearLayout(ctx) {
+    /**
+     * A movable group of buttons. Default spot is given as fractions of the free space.
+     * Upright and sideways screens remember their own spots.
+     */
+    private inner class Group(name: String, val defX: Float, val defY: Float, vertical: Boolean) : LinearLayout(ctx) {
+        val key = if (builtPortrait) "${name}_p" else name
         private var downX = 0f
         private var downY = 0f
         private var startX = 0f
@@ -54,6 +60,8 @@ class Controls(
             x = fx * freeW
             y = fy * freeH
         }
+
+        fun rect() = android.graphics.RectF(x, y, x + width, y + height)
 
         fun save() {
             val freeW = (root.width - width).coerceAtLeast(1)
@@ -140,20 +148,63 @@ class Controls(
         }
     }
 
-    /** Drag up/down on it like a mouse wheel; a quick tap on the top/bottom half scrolls one step. */
+    /** Acts the moment it's pressed, then keeps repeating while held. */
+    private fun repeatButton(label: String, w: Int, first: () -> Unit, again: () -> Unit) = round(label, w).apply {
+        val repeat = object : Runnable {
+            override fun run() {
+                again()
+                postDelayed(this, 40)
+            }
+        }
+        setOnTouchListener { v, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    press(this, true)
+                    first()
+                    postDelayed(repeat, 300)
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    press(this, false)
+                    removeCallbacks(repeat)
+                }
+            }
+            v.parent.requestDisallowInterceptTouchEvent(!editing)
+            true
+        }
+    }
+
+    /**
+     * Drag up/down on it like a mouse wheel. Tap the top/bottom half to scroll one step;
+     * hold it there to keep scrolling (it speeds up the longer you hold).
+     */
     private fun wheel(w: Int, h: Int) = round("▲\n\n≡\n\n▼", w, h, 13f).apply {
         var lastY = 0f
         var downY = 0f
         var moved = false
         var acc = 0f
+        var dir = 0
+        var steps = 0
+        val repeat = object : Runnable {
+            override fun run() {
+                if (moved) return
+                conn()?.scroll(dir * (120 * s.scrollSpeed).toInt().coerceAtLeast(40), 0)
+                steps++
+                postDelayed(this, (110L - steps * 6).coerceAtLeast(35L))
+            }
+        }
         setOnTouchListener { _, e ->
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     press(this, true)
-                    lastY = e.y; downY = e.y; moved = false; acc = 0f
+                    lastY = e.y; downY = e.y; moved = false; acc = 0f; steps = 0
+                    dir = if (e.y < height / 2f) 1 else -1
+                    postDelayed(repeat, 280)
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (abs(e.y - downY) > ctx.dp(6)) moved = true
+                    if (abs(e.y - downY) > ctx.dp(6)) {
+                        moved = true
+                        removeCallbacks(repeat)
+                    }
                     if (moved) {
                         // Finger up = scroll up, like rolling a wheel forward. 20 dp = one notch.
                         acc += (lastY - e.y) / ctx.resources.displayMetrics.density * 6f * s.scrollSpeed
@@ -167,9 +218,13 @@ class Controls(
                 }
                 MotionEvent.ACTION_UP -> {
                     press(this, false)
-                    if (!moved) conn()?.scroll(if (e.y < height / 2f) 120 else -120, 0)
+                    removeCallbacks(repeat)
+                    if (!moved && steps == 0) conn()?.scroll(dir * 120, 0)
                 }
-                MotionEvent.ACTION_CANCEL -> press(this, false)
+                MotionEvent.ACTION_CANCEL -> {
+                    press(this, false)
+                    removeCallbacks(repeat)
+                }
             }
             true
         }
@@ -186,7 +241,9 @@ class Controls(
         for (g in groups) root.removeView(g)
         groups.clear()
         if (dragLock) setDragLock(false)
+        builtPortrait = portrait
         val b = size()
+        val tall = builtPortrait
 
         val mouse = Group("mouse", 1f, 1f, vertical = false)
         val left = mouseButton("L", 0, (b * 1.35).toInt())
@@ -195,15 +252,16 @@ class Controls(
         val buttons = if (s.leftHanded) listOf(right, middle, left) else listOf(left, middle, right)
         buttons.forEach { mouse.addView(it) }
 
-        val wheelGroup = Group("wheel", 1f, 0.5f, vertical = true)
+        val wheelGroup = Group("wheel", 1f, if (tall) 0.62f else 0.45f, vertical = true)
         wheelGroup.addView(wheel(b, (b * 2.6).toInt()))
 
-        val zoom = Group("zoom", 0f, 0.42f, vertical = true)
-        zoom.addView(tapButton("+", b) { remote.zoomBy(1.4f) })
-        zoom.addView(tapButton("−", b) { remote.zoomBy(1 / 1.4f) })
+        val zoom = Group("zoom", 0f, if (tall) 0.3f else 0.38f, vertical = true)
+        zoom.addView(repeatButton("+", b, { remote.zoomBy(1.25f) }) { remote.zoomBy(1.05f) })
+        zoom.addView(repeatButton("−", b, { remote.zoomBy(1 / 1.25f) }) { remote.zoomBy(1 / 1.05f) })
         zoom.addView(tapButton("Fit", b) { remote.resetZoom() }.apply { shrink(0.8f) })
 
-        val quick = Group("quick", 0f, 1f, vertical = false)
+        // Upright screens are narrow: stack these so they don't run into the mouse buttons.
+        val quick = Group("quick", 0f, if (tall) 0.78f else 1f, vertical = tall)
         quick.addView(tapButton("⌨", b) { onKeyboard() })
         dragLockView = tapButton("Hold", b) { setDragLock(!dragLock) }.apply { shrink(0.75f) }
         quick.addView(dragLockView)
@@ -217,11 +275,35 @@ class Controls(
             root.addView(g, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START))
         }
         applyLook()
-        root.post { groups.forEach { it.place() } }
+        root.post { placeAll() }
     }
 
-    /** Re-place groups after rotation or resize. */
-    fun relayout() = groups.forEach { it.place() }
+    /** Re-place groups after rotation or resize (rotation rebuilds: different layout). */
+    fun relayout() {
+        if (portrait != builtPortrait) build() else placeAll()
+    }
+
+    private fun placeAll() {
+        groups.forEach { it.place() }
+        if (!editing) unstack()
+    }
+
+    /** Moves groups apart if any overlap (e.g. on a small screen), mouse buttons stay put. */
+    private fun unstack() {
+        val gap = ctx.dp(4).toFloat()
+        for (i in 1 until groups.size) {
+            val g = groups[i]
+            if (g.visibility != View.VISIBLE || g.width == 0) continue
+            repeat(groups.size) {
+                val hit = groups.take(i).firstOrNull { o ->
+                    o.visibility == View.VISIBLE && android.graphics.RectF.intersects(o.rect(), g.rect())
+                } ?: return@repeat
+                val above = hit.y - g.height - gap
+                val below = hit.y + hit.height + gap
+                g.y = if (above >= 0) above else below.coerceAtMost((root.height - g.height).toFloat())
+            }
+        }
+    }
 
     private fun TextView.shrink(f: Float) = setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, textSize * f)
 

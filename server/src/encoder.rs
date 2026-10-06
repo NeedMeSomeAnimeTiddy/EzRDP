@@ -16,9 +16,9 @@ pub struct Quality {
 
 pub fn quality(level: u8) -> Quality {
     match level {
-        0 => Quality { max_width: 2560, bitrate: 12_000_000, fps: 60 },
+        0 => Quality { max_width: 2560, bitrate: 14_000_000, fps: 60 },
         2 => Quality { max_width: 1280, bitrate: 1_500_000, fps: 30 },
-        _ => Quality { max_width: 1920, bitrate: 5_000_000, fps: 60 },
+        _ => Quality { max_width: 1920, bitrate: 6_000_000, fps: 60 },
     }
 }
 
@@ -49,6 +49,21 @@ impl H264 {
 
     pub fn force_keyframe(&mut self) {
         self.enc.force_intra_frame();
+    }
+
+    /// Changes the target bitrate on the fly (used to back off when the network is slow).
+    pub fn set_bitrate(&mut self, bps: u32) {
+        #[repr(C)]
+        struct BitrateInfo {
+            layer: i32,
+            bitrate: i32,
+        }
+        const SPATIAL_LAYER_ALL: i32 = 4;
+        const ENCODER_OPTION_BITRATE: i32 = 5;
+        let mut info = BitrateInfo { layer: SPATIAL_LAYER_ALL, bitrate: bps as i32 };
+        unsafe {
+            self.enc.raw_api().set_option(ENCODER_OPTION_BITRATE, (&raw mut info).cast());
+        }
     }
 
     /// Returns `(annex-b bytes, is_keyframe)`, or `None` if the encoder skipped the frame.

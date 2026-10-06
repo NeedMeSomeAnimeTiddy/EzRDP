@@ -11,12 +11,13 @@ Small, fast remote desktop: control your Windows PC from your Android phone.
 
 | | |
 |---|---|
-| Mouse | Trackpad mode (like a laptop touchpad) or Touch mode (tap where you want) |
+| Mouse | **Both** mode (default): tap to click right there, drag to move the pointer like a trackpad. Also plain Trackpad or Touch mode |
 | Keyboard | Phone keyboard types on the PC. Extra keys bar: Esc, Tab, Ctrl, Alt, Shift, Win, arrows, F1–F12, Task Manager, Alt+Tab… |
 | Screens | Pick which monitor to view |
 | Sound | Hear the PC on your phone (toggle on/off) |
 | Zoom | Pinch to zoom in on small text |
-| Quality | High / Balanced / Data saver |
+| Quality | High / Balanced / Data saver. Uses the PC's graphics card to encode when it can (less delay) |
+| Phone → PC | Let the PC control your phone too: hold a PC in the list → **Let this PC control my phone** |
 
 ### On-screen buttons
 
@@ -25,8 +26,8 @@ Game-style buttons sit over the picture (move them with ☰ → **Edit layout**)
 | Button | What it does |
 |---|---|
 | **L / M / R** | Left, middle, right mouse button. Hold one and drag with another finger to drag things. |
-| **Wheel** (▲ ≡ ▼) | Drag up/down like a mouse wheel, or tap the top/bottom for one step. |
-| **+ / − / Fit** | Zoom in/out around the pointer, or back to the whole screen. |
+| **Wheel** (▲ ≡ ▼) | Drag up/down like a mouse wheel. Tap the top/bottom for one step, hold it to keep scrolling. |
+| **+ / − / Fit** | Zoom in/out around the pointer (hold to keep zooming), or back to the whole screen. While zoomed, push the pointer to an edge and the view glides that way. |
 | **⌨** | Phone keyboard. |
 | **Hold** | Keeps the left button pressed until you tap it again (easy dragging). |
 | **Hide / Show** | Hides the buttons for a clean view. |
@@ -35,18 +36,40 @@ Game-style buttons sit over the picture (move them with ☰ → **Edit layout**)
 click, scroll speed and direction, button size and visibility, left-handed layout, vibration,
 quality and sound.
 
-### Gestures (Trackpad mode)
+Upright and sideways screens each have their own button layout.
+
+### Gestures (Both mode)
 
 | Do this | Get this |
 |---|---|
-| Drag 1 finger | Move pointer |
-| Tap | Left click |
+| Tap | Pointer jumps there and left-clicks |
+| Drag 1 finger | Move pointer like a trackpad |
+| Drag starting on the pointer | Pointer follows your finger exactly |
 | Tap, then tap-and-hold and drag | Click and drag (select text, move windows) |
-| 2-finger tap, or long press | Right click |
+| Long press | Right click there |
+| 2-finger tap | Right click |
 | 2-finger drag | Scroll |
 | Pinch | Zoom in/out |
 
-In **Touch mode** the pointer jumps to your finger: tap = click there, drag = drag, long press = right click.
+**Trackpad mode:** taps click where the pointer is. **Touch mode:** the pointer is always under your finger.
+
+### Letting the PC control your phone
+
+On the phone, hold your PC in the list → **Let this PC control my phone**. The first time, the app
+walks you through switching on "EzRDP" in Android's Accessibility settings (that's what lets the PC
+tap and type). Then Android asks to share the screen. A window showing the phone opens on the PC:
+
+| On the PC | On the phone |
+|---|---|
+| Click / drag | Tap / swipe |
+| Hold the mouse button | Long press |
+| Right-click, Esc | Back |
+| Middle-click | Home |
+| Mouse wheel | Scroll |
+| Typing, Backspace, Enter | Typed into the selected text box |
+| Menu: Recent apps, Notifications | Same |
+
+Stop from the phone's notification, or close the window on the PC.
 
 ## Setup
 
@@ -94,16 +117,21 @@ home. People with a DDNS name can set it per PC: long-press the PC in the app �
 
 - The PC must be signed in. The Windows lock screen and UAC prompts can't be shown (Windows blocks that for normal apps). The picture comes back when they're gone.
 - One phone at a time. A new connection takes over from the old one.
+- Clicks and typing always go to the screen the phone is showing (the mouse is moved there first).
 - EzRDP runs as a tray app, not a Windows service: services can't see your screen.
 
 ## How it works (short)
 
 - Screen capture: DXGI Desktop Duplication (GPU, read-only, only sends frames when something changes).
-- Video: H.264 (OpenH264, screen-content mode) → hardware decoder on the phone, with low-latency mode.
+- Video: H.264, encoded on the PC's graphics card through Windows Media Foundation (NVIDIA, AMD or Intel),
+  or OpenH264 in software if that isn't available → hardware decoder on the phone, low-latency mode,
+  drawn straight to the screen (SurfaceView).
+- Bitrate adapts: it drops when the network can't keep up and climbs back when it can.
 - Lag control: the PC only sends a new frame once the phone has confirmed the earlier ones, so delay can't pile up on slow connections.
 - Input: Windows `SendInput`. Sound: WASAPI loopback → raw 16-bit PCM.
 
 ## Building yourself
 
 - PC: install Rust, then `cd server && cargo build --release`
-- Android: `cd android && ./gradlew assembleRelease` (needs the Android SDK)
+- Android: `cd android && ./gradlew assembleRelease` (needs the Android SDK). Builds are signed with
+  `android/app/ezrdp.keystore` so every new APK installs as an update over the last one.

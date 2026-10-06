@@ -11,15 +11,30 @@ android {
         applicationId = "com.ezrdp.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        // Goes up with every build (minutes since Sept 2025), so Android offers "Update"
+        // instead of treating a new APK as the same app that's already installed.
+        val build = ((System.currentTimeMillis() / 60_000L) - 29_270_000L).toInt()
+        versionCode = build
+        versionName = "1.1.$build"
+    }
+
+    signingConfigs {
+        // One fixed key kept with the project, so every build can update the last one.
+        create("ezrdp") {
+            storeFile = file("ezrdp.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Signed with the debug key so the APK installs without extra setup.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("ezrdp")
+        }
+        debug {
+            signingConfig = signingConfigs.getByName("ezrdp")
         }
     }
 

@@ -6,9 +6,10 @@ import android.content.Context
 class Settings(context: Context) {
     private val p = context.getSharedPreferences("ezrdp", Context.MODE_PRIVATE)
 
-    var trackpad: Boolean
-        get() = p.getBoolean("trackpad", true)
-        set(v) = p.edit().putBoolean("trackpad", v).apply()
+    /** MODE_BOTH (tap jumps + drag moves like a trackpad), MODE_TRACKPAD or MODE_TOUCH. */
+    var mouseMode: Int
+        get() = p.getInt("mouseMode", MODE_BOTH)
+        set(v) = p.edit().putInt("mouseMode", v).apply()
     var pointerSpeed: Float
         get() = p.getFloat("pointerSpeed", 1f)
         set(v) = p.edit().putFloat("pointerSpeed", v).apply()
@@ -48,6 +49,17 @@ class Settings(context: Context) {
     var sound: Boolean
         get() = p.getBoolean("sound", false)
         set(v) = p.edit().putBoolean("sound", v).apply()
+    /** Let the PC encode video on its graphics card (faster; turn off if the picture breaks). */
+    var gpuEncoder: Boolean
+        get() = p.getBoolean("gpuEncoder", true)
+        set(v) = p.edit().putBoolean("gpuEncoder", v).apply()
+
+    companion object {
+        const val MODE_BOTH = 0
+        const val MODE_TRACKPAD = 1
+        const val MODE_TOUCH = 2
+        val MODE_NAMES = listOf("Both", "Trackpad", "Touch")
+    }
 
     /** Saved position of an on-screen control group, as fractions of the free space (0..1). */
     fun position(key: String): Pair<Float, Float>? {

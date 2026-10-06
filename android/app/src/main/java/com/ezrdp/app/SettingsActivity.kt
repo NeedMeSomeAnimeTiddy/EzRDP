@@ -34,11 +34,16 @@ class SettingsActivity : Activity() {
         col.addView(header)
 
         section("Mouse")
-        choice("Control mode", listOf("Trackpad", "Touch"), if (s.trackpad) 0 else 1) { s.trackpad = it == 0 }
-        note("Trackpad: drag to move the pointer, like a laptop. Touch: the pointer jumps to your finger.")
+        choice("Control mode", Settings.MODE_NAMES, s.mouseMode) { s.mouseMode = it }
+        note(
+            "Both: tap anything to click it, drag to move the pointer like a laptop trackpad, " +
+                "or drag the pointer itself to place it exactly.\n" +
+                "Trackpad: taps click wherever the pointer is.\n" +
+                "Touch: the pointer is always under your finger."
+        )
         slider("Pointer speed", s.pointerSpeed, 0.3f, 3f, "x") { s.pointerSpeed = it }
         toggle("Tap to click", s.tapToClick) { s.tapToClick = it }
-        note("Off: only the on-screen buttons click (avoids accidental clicks).")
+        note("Off: tapping only moves the pointer; the on-screen buttons click.")
         slider("Pointer size", s.cursorSize, 0.6f, 2.5f, "x") { s.cursorSize = it }
 
         section("Scrolling")
@@ -64,7 +69,9 @@ class SettingsActivity : Activity() {
         section("Picture and sound")
         choice("Quality", listOf("High", "Balanced", "Data saver"), s.quality) { s.quality = it }
         note("High is sharpest on home Wi-Fi. Data saver is best on mobile data.")
-        toggle("Sound on by default", s.sound) { s.sound = it }
+        toggle("Sound", s.sound) { s.sound = it }
+        toggle("Use the PC's graphics card", s.gpuEncoder) { s.gpuEncoder = it }
+        note("Makes the picture faster. Turn off if the picture looks broken or stays black.")
 
         setContentView(ScrollView(this).apply {
             setBackgroundColor(0xFF101114.toInt())

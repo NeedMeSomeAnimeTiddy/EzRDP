@@ -151,7 +151,15 @@ class MainActivity : Activity() {
                 pc.internet.isNotEmpty() || pc.manual.isNotEmpty() -> "Away from home · tap to connect"
                 else -> "Not found on this Wi-Fi"
             }
-            savedList.addView(card(pc.name, sub, { connect(pc, live) }, { options(pc) }))
+            savedList.addView(card(pc.name, sub, { connect(pc, live) }, { options(pc, live) }))
+        }
+        if (saved.isNotEmpty()) {
+            savedList.addView(TextView(this).apply {
+                text = "Hold a PC for more, like letting it control this phone."
+                textSize = 13f
+                setTextColor(0xFF7C838E.toInt())
+                setPadding(dp(2), dp(2), 0, dp(4))
+            })
         }
         if (saved.isEmpty()) {
             savedList.addView(TextView(this).apply {
@@ -178,11 +186,15 @@ class MainActivity : Activity() {
         startActivity(i)
     }
 
-    private fun options(pc: SavedPc) {
+    private fun options(pc: SavedPc, live: FoundPc?) {
         AlertDialog.Builder(this)
             .setTitle(pc.name)
-            .setItems(arrayOf("Set internet address…", "Forget this PC")) { _, which ->
-                if (which == 0) setManualAddress(pc) else {
+            .setItems(arrayOf("Let this PC control my phone", "Set internet address…", "Forget this PC")) { _, which ->
+                if (which == 0) {
+                    val i = Intent(this, ShareActivity::class.java).putExtra("pc", pc.id)
+                    if (live != null) i.putExtra("liveHost", live.host).putExtra("livePort", live.port)
+                    startActivity(i)
+                } else if (which == 1) setManualAddress(pc) else {
                     AlertDialog.Builder(this)
                         .setMessage("Forget ${pc.name}? You'll need to add it again (at home) to connect.")
                         .setPositiveButton("Forget") { _, _ ->

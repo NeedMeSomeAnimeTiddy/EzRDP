@@ -16,7 +16,17 @@ data class SavedPc(
     var port: Int = 7270,
     /** Optional address typed by the user (e.g. a DDNS name), tried after the others. */
     var manual: String = "",
-)
+) {
+    /** Addresses to try, best first: found on this Wi-Fi now, last home address, then internet. */
+    fun addresses(liveHost: String?): List<Pair<String, Int>> {
+        val list = ArrayList<Pair<String, Int>>()
+        liveHost?.let { list.add(it to 6000) }
+        if (home.isNotEmpty()) list.add(home to 1200)
+        if (manual.isNotEmpty()) list.add(manual to 6000)
+        if (internet.isNotEmpty()) list.add(internet to 6000)
+        return list.distinctBy { it.first }
+    }
+}
 
 /** Saved PCs, kept in app storage. */
 class PcStore(context: Context) {

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="control_service_label">EzRDP: let my PC control this phone</string>
+    <string name="control_service_description">Lets your paired PC tap, swipe and type on this phone, only while you share the phone\'s screen from the EzRDP app. Nothing is done at any other time.</string>
+</resources>

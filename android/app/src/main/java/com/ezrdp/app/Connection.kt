@@ -45,13 +45,33 @@ object Msg {
     const val C_PAIR_START = 0x8E
     const val C_PAIR_KEY = 0x8F
 
+    // Sharing this phone's screen with the PC (role 1).
+    const val P_SCREEN_CONFIG = 0x90
+    const val P_SCREEN_FRAME = 0x91
+    const val S_TOUCH = 0x20
+    const val S_NAV = 0x21
+    const val S_TYPE = 0x22
+    const val S_SWIPE = 0x23
+    const val S_FRAME_ACK = 0x24
+    const val S_KEYFRAME = 0x25
+
+    const val NAV_BACK = 0
+    const val NAV_HOME = 1
+    const val NAV_RECENTS = 2
+    const val NAV_NOTIFICATIONS = 3
+    const val NAV_BACKSPACE = 4
+    const val NAV_ENTER = 5
+
+    const val ROLE_CONTROL_PC = 0
+    const val ROLE_SHARE_PHONE = 1
+
     const val RESULT_DENIED = 0
     const val RESULT_OK = 1
     const val RESULT_PAUSED = 2
     const val RESULT_NOT_LOCAL = 3
     const val RESULT_BUSY = 4
 
-    const val VERSION = 3
+    const val VERSION = 4
 }
 
 data class MonitorInfo(val index: Int, val primary: Boolean, val width: Int, val height: Int, val name: String)
@@ -126,16 +146,36 @@ internal fun readHello(input: DataInputStream): Hello {
 }
 
 interface ConnectionListener {
-    fun onMonitors(list: List<MonitorInfo>)
-    fun onVideoConfig(monitor: Int, width: Int, height: Int)
-    fun onVideoFrame(data: ByteArray, offset: Int, length: Int, keyframe: Boolean)
-    fun onCursor(x: Float, y: Float, visible: Boolean)
-    fun onAudioConfig(sampleRate: Int, channels: Int)
-    fun onAudio(data: ByteArray, offset: Int, length: Int)
+    fun onMonitors(list: List<MonitorInfo>) {}
+    fun onVideoConfig(monitor: Int, width: Int, height: Int) {}
+    fun onVideoFrame(data: ByteArray, offset: Int, length: Int, keyframe: Boolean) {}
+    fun onCursor(x: Float, y: Float, visible: Boolean) {}
+    fun onAudioConfig(sampleRate: Int, channels: Int) {}
+    fun onAudio(data: ByteArray, offset: Int, length: Int) {}
     /** The PC's current home address, internet address and port, to remember for next time. */
-    fun onAddresses(home: String, internet: String, port: Int)
+    fun onAddresses(home: String, internet: String, port: Int) {}
     fun onDisconnected(error: Exception?)
+
+    // While sharing this phone's screen, the PC sends these.
+    /** action 0 = finger down, 1 = move, 2 = up; x/y are 0..1 of the phone screen. */
+    fun onTouch(action: Int, x: Float, y: Float) {}
+    fun onNav(what: Int) {}
+    fun onType(text: String) {}
+    fun onSwipe(x: Float, y: Float, dx: Float, dy: Float) {}
+    fun onFrameAck(id: Int) {}
+    fun onKeyframeRequest() {}
 }
+
+/** Extra details sent when logging in. */
+class LoginOptions(
+    val quality: Int = 1,
+    val role: Int = Msg.ROLE_CONTROL_PC,
+    /** Biggest picture this phone can decode (0 = unknown). */
+    val maxWidth: Int = 0,
+    val maxHeight: Int = 0,
+    /** Let the PC use its graphics card to encode (faster). */
+    val gpuEncoder: Boolean = true,
+)
 
 /**
  * One TCP connection to the PC. Reading happens on its own thread; sends are queued
@@ -148,7 +188,7 @@ class Connection(
     private val pcId: ByteArray?,
     private val deviceId: ByteArray,
     private val deviceKey: ByteArray,
-    private val quality: Int,
+    private val options: LoginOptions,
     private val listener: ConnectionListener,
     private val connectTimeout: Int = 6000,
 ) {
@@ -176,7 +216,14 @@ class Connection(
         val ns = hello.nonce
         val nc = ByteArray(16).also { SecureRandom().nextBytes(it) }
         val proof = Keys.derive(deviceKey, "auth", ns, nc)
-        writePlain(output, Msg.C_AUTH, deviceId + nc + proof + byteArrayOf(quality.toByte()))
+        val extra = ByteBuffer.allocate(7)
+            .put(options.quality.toByte())
+            .put(options.role.toByte())
+            .putShort(options.maxWidth.coerceIn(0, 65535).toShort())
+            .putShort(options.maxHeight.coerceIn(0, 65535).toShort())
+            .put(if (options.gpuEncoder) 1 else 0)
+            .array()
+        writePlain(output, Msg.C_AUTH, deviceId + nc + proof + extra)
         val result = readPlain(input)
         if (result.first != Msg.S_AUTH_RESULT) throw IOException("Not an EzRDP PC")
         when (result.second[0].toInt()) {
@@ -281,6 +328,15 @@ class Connection(
                 b.position(b.position() + netLen)
                 listener.onAddresses(home, net, b.short.toInt() and 0xffff)
             }
+            Msg.S_TOUCH -> {
+                val action = b.get().toInt()
+                listener.onTouch(action, b.float, b.float)
+            }
+            Msg.S_NAV -> listener.onNav(b.get().toInt())
+            Msg.S_TYPE -> listener.onType(String(msg, 1, msg.size - 1, Charsets.UTF_8))
+            Msg.S_SWIPE -> listener.onSwipe(b.float, b.float, b.float, b.float)
+            Msg.S_FRAME_ACK -> listener.onFrameAck(b.int)
+            Msg.S_KEYFRAME -> listener.onKeyframeRequest()
         }
     }
 
@@ -349,4 +405,19 @@ class Connection(
     fun setAudio(on: Boolean) = send(Msg.C_SET_AUDIO, byteArrayOf(if (on) 1 else 0))
     fun requestKeyframe() = send(Msg.C_KEYFRAME)
     fun setQuality(q: Int) = send(Msg.C_SET_QUALITY, byteArrayOf(q.toByte()))
+
+    // --- Sharing this phone's screen ---
+
+    fun sendScreenConfig(w: Int, h: Int) =
+        send(Msg.P_SCREEN_CONFIG, ByteBuffer.allocate(4).putShort(w.toShort()).putShort(h.toShort()).array())
+
+    fun sendScreenFrame(id: Int, keyframe: Boolean, data: ByteArray, offset: Int, length: Int) {
+        val p = ByteArray(5 + length)
+        ByteBuffer.wrap(p).putInt(id).put(if (keyframe) 1 else 0)
+        System.arraycopy(data, offset, p, 5, length)
+        send(Msg.P_SCREEN_FRAME, p)
+    }
+
+    /** Messages waiting to go out (used to avoid piling up video on a slow link). */
+    fun queued(): Int = queue.size
 }

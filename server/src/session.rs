@@ -2,7 +2,8 @@
 
 use crate::capture::{CapError, Monitor, Source, monitors};
 use crate::convert::{Yuv, out_size};
-use crate::encoder::{H264, quality, scale_for};
+use crate::encoder::{H264, Quality, quality, scale_for};
+use crate::hwenc::HwEncoder;
 use crate::input::{Input, cursor, wake_displays};
 use crate::protocol::*;
 use crate::login::Login;
@@ -26,6 +27,9 @@ pub struct Shared {
     last_ack: AtomicU32,
     keyframe: AtomicBool,
     current: Mutex<Option<Monitor>>,
+    /// Biggest picture the phone can show, and whether the graphics-card encoder may be used.
+    max_size: (usize, usize),
+    hw_encoder: AtomicBool,
 }
 
 impl Shared {
@@ -36,15 +40,23 @@ impl Shared {
 
 /// Runs a session until the phone disconnects or the socket is shut down (new phone / Pause).
 pub fn run(stream: TcpStream, login: Login, info: Vec<u8>, _app: Arc<crate::state::App>) {
-    let shared = new_shared();
+    let shared = new_shared(&login);
     let tx = Arc::new(Sender::new(stream.try_clone().unwrap(), login.tx));
     shared.quality.store(login.quality, Relaxed);
     let _ = tx.send(S_INFO, &info);
 
+    // Start on the screen the mouse is on: that's where the person was working.
     let mons = monitors();
-    let primary = mons.iter().position(|m| m.primary).unwrap_or(0);
-    shared.monitor.store(primary as u8, Relaxed);
+    let start = cursor()
+        .and_then(|(x, y)| mons.iter().position(|m| x >= m.x && x < m.x + m.w && y >= m.y && y < m.y + m.h))
+        .or_else(|| mons.iter().position(|m| m.primary))
+        .unwrap_or(0);
+    shared.monitor.store(start as u8, Relaxed);
     let _ = send_monitors(&tx, &mons);
+    unsafe {
+        // Finer sleep timing for smoother frame pacing.
+        windows::Win32::Media::timeBeginPeriod(1);
+    }
 
     let video = {
         let (tx, shared) = (tx.clone(), shared.clone());
@@ -76,9 +88,12 @@ pub fn run(stream: TcpStream, login: Login, info: Vec<u8>, _app: Arc<crate::stat
     let _ = video.join();
     let _ = audio.join();
     let _ = pinger.join();
+    unsafe {
+        windows::Win32::Media::timeEndPeriod(1);
+    }
 }
 
-fn new_shared() -> Arc<Shared> {
+fn new_shared(login: &Login) -> Arc<Shared> {
     Arc::new(Shared {
         stop: AtomicBool::new(false),
         audio_on: AtomicBool::new(false),
@@ -88,6 +103,8 @@ fn new_shared() -> Arc<Shared> {
         last_ack: AtomicU32::new(0),
         keyframe: AtomicBool::new(false),
         current: Mutex::new(None),
+        max_size: (login.max_w as usize, login.max_h as usize),
+        hw_encoder: AtomicBool::new(login.hw_encoder),
     })
 }
 
@@ -121,11 +138,18 @@ fn handle(kind: u8, body: &[u8], shared: &Shared, input: &mut Input, tx: &Sender
         }
         C_MOUSE_BUTTON => {
             if let (Some(b), Some(d)) = (p.u8(), p.u8()) {
+                // A click must land on the screen the phone is showing, not wherever the mouse was left.
+                if d != 0 && let Some(m) = mon() {
+                    input.ensure_on(&m);
+                }
                 input.button(b, d != 0);
             }
         }
         C_SCROLL => {
             if let (Some(dy), Some(dx)) = (p.i16(), p.i16()) {
+                if let Some(m) = mon() {
+                    input.ensure_on(&m);
+                }
                 input.scroll(dy, dx);
             }
         }
@@ -164,6 +188,64 @@ fn handle(kind: u8, body: &[u8], shared: &Shared, input: &mut Input, tx: &Sender
     }
 }
 
+/// Whichever encoder is in use: the graphics card's, or the software one.
+enum Video {
+    Hard(HwEncoder),
+    Soft(H264),
+}
+
+impl Video {
+    fn open(w: usize, h: usize, q: Quality, try_hw: bool) -> Result<Self, String> {
+        if try_hw {
+            match HwEncoder::new(w, h, q.fps, q.bitrate) {
+                Ok(e) => {
+                    crate::log!("Video: graphics card encoder ({}) at {w}x{h}", e.name);
+                    return Ok(Video::Hard(e));
+                }
+                Err(e) => crate::log!("Video: graphics card encoder unavailable ({e}); using software"),
+            }
+        }
+        crate::log!("Video: software encoder at {w}x{h}");
+        H264::new(q).map(Video::Soft).map_err(|e| e.to_string())
+    }
+
+    fn encode(&mut self, yuv: &Yuv) -> Result<Option<(&[u8], bool)>, String> {
+        match self {
+            Video::Hard(e) => e.encode(yuv),
+            Video::Soft(e) => e.encode(yuv).map_err(|e| e.to_string()),
+        }
+    }
+
+    fn force_keyframe(&mut self) {
+        match self {
+            Video::Hard(e) => e.force_keyframe(),
+            Video::Soft(e) => e.force_keyframe(),
+        }
+    }
+
+    fn set_bitrate(&mut self, bps: u32) {
+        match self {
+            Video::Hard(e) => e.set_bitrate(bps),
+            Video::Soft(e) => e.set_bitrate(bps),
+        }
+    }
+}
+
+/// Picks the shrink factor: the quality's width limit, and never bigger than the phone can decode.
+fn pick_scale(m: &Monitor, q: Quality, max: (usize, usize)) -> usize {
+    let (w, h) = (m.w as usize, m.h as usize);
+    let mut scale = scale_for(w, q.max_width);
+    // Compare long side with long side, so a portrait monitor isn't penalised.
+    let (long, short) = (w.max(h), w.min(h));
+    let (max_long, max_short) = (max.0.max(max.1), max.0.min(max.1));
+    if max_long > 0 && max_short > 0 {
+        while scale < 4 && (long / scale > max_long || short / scale > max_short) {
+            scale += 1;
+        }
+    }
+    scale
+}
+
 fn video_loop(tx: &Sender, shared: &Shared) {
     unsafe {
         SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
@@ -187,17 +269,17 @@ fn video_loop(tx: &Sender, shared: &Shared) {
             }
         };
         last_error = None;
-        let mut enc = match H264::new(q) {
+        let m = cap.monitor().clone();
+        *shared.current.lock().unwrap() = Some(m.clone());
+        let scale = pick_scale(&m, q, shared.max_size);
+        let (vw, vh) = out_size(m.w as usize, m.h as usize, scale);
+        let mut enc = match Video::open(vw, vh, q, shared.hw_encoder.load(Relaxed)) {
             Ok(e) => e,
             Err(e) => {
                 crate::log!("encoder error: {e}");
                 break;
             }
         };
-        let m = cap.monitor().clone();
-        *shared.current.lock().unwrap() = Some(m.clone());
-        let scale = scale_for(m.w as usize, q.max_width);
-        let (vw, vh) = out_size(m.w as usize, m.h as usize, scale);
         let index = shared.monitor.load(Relaxed);
         let mut cfg = vec![index];
         cfg.extend_from_slice(&(vw as u16).to_be_bytes());
@@ -214,9 +296,16 @@ fn video_loop(tx: &Sender, shared: &Shared) {
         let mut need_send = false;
         // After the screen stops changing, re-encode a few times so the picture sharpens up.
         let mut refine_left = 0;
+        // Bitrate adapts to the network: back off when frames pile up, creep back up when clear.
+        let mut bitrate = q.bitrate;
+        let mut window_start = Instant::now();
+        let mut blocked = 0u32;
+        let mut sent = 0u32;
+        // Graphics-card encoders that stop giving pictures get swapped for the software one.
+        let mut empty_in_row = 0u32;
 
         while !shared.stopped() && shared.generation.load(Relaxed) == generation {
-            match cap.frame(16, &mut yuv, scale) {
+            match cap.frame(8, &mut yuv, scale) {
                 Ok(true) => {
                     have_image = true;
                     need_send = true;
@@ -247,18 +336,42 @@ fn video_loop(tx: &Sender, shared: &Shared) {
                 }
             }
 
+            if window_start.elapsed() >= Duration::from_secs(1) {
+                let target = if blocked > 6 {
+                    (bitrate as f32 * 0.7) as u32
+                } else if blocked == 0 && sent > 0 {
+                    (bitrate as f32 * 1.15) as u32
+                } else {
+                    bitrate
+                }
+                .clamp(q.bitrate / 6, q.bitrate);
+                if target != bitrate {
+                    bitrate = target;
+                    enc.set_bitrate(bitrate);
+                }
+                window_start = Instant::now();
+                blocked = 0;
+                sent = 0;
+            }
+
             if shared.keyframe.swap(false, Relaxed) {
                 enc.force_keyframe();
                 need_send = have_image;
             }
+            if !need_send || !have_image || last_sent.elapsed() < min_gap {
+                continue;
+            }
             let in_flight = frame_id.wrapping_sub(shared.last_ack.load(Relaxed));
-            if !need_send || !have_image || in_flight >= MAX_IN_FLIGHT || last_sent.elapsed() < min_gap {
+            if in_flight >= MAX_IN_FLIGHT {
+                blocked += 1;
                 continue;
             }
             need_send = false;
             last_sent = Instant::now();
             match enc.encode(&yuv) {
                 Ok(Some((data, key))) => {
+                    empty_in_row = 0;
+                    sent += 1;
                     frame_id = frame_id.wrapping_add(1);
                     let mut head = frame_id.to_be_bytes().to_vec();
                     head.push(key as u8);
@@ -266,8 +379,22 @@ fn video_loop(tx: &Sender, shared: &Shared) {
                         break 'outer;
                     }
                 }
-                Ok(None) => need_send = true, // encoder skipped it to save bandwidth; try again
-                Err(e) => crate::log!("encode error: {e}"),
+                Ok(None) => {
+                    need_send = true; // skipped to save bandwidth, or still busy; try again
+                    empty_in_row += 1;
+                    if empty_in_row > 60 && matches!(enc, Video::Hard(_)) {
+                        crate::log!("Video: graphics card encoder stopped giving pictures; switching to software");
+                        shared.hw_encoder.store(false, Relaxed);
+                        continue 'outer;
+                    }
+                }
+                Err(e) => {
+                    crate::log!("encode error: {e}");
+                    if matches!(enc, Video::Hard(_)) {
+                        shared.hw_encoder.store(false, Relaxed);
+                        continue 'outer;
+                    }
+                }
             }
         }
     }

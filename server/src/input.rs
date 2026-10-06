@@ -106,6 +106,18 @@ impl Input {
         self.move_to(x, y);
     }
 
+    /// If the mouse is on a different screen than the one being viewed, brings it to the middle
+    /// of the viewed one, so clicks and typing go where the phone is looking.
+    pub fn ensure_on(&mut self, m: &Monitor) {
+        let mut p = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut p);
+        }
+        if p.x < m.x || p.x >= m.x + m.w || p.y < m.y || p.y >= m.y + m.h {
+            self.move_to(m.x + m.w / 2, m.y + m.h / 2);
+        }
+    }
+
     pub fn button(&mut self, b: u8, down: bool) {
         let flags = match (b, down) {
             (0, true) => MOUSEEVENTF_LEFTDOWN,

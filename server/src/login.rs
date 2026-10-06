@@ -11,6 +11,13 @@ use std::time::Duration;
 
 pub struct Login {
     pub quality: u8,
+    /// 0 = the phone controls this PC, 1 = the phone shares its own screen for the PC to control.
+    pub role: u8,
+    /// Biggest picture the phone can decode (0 = unknown).
+    pub max_w: u16,
+    pub max_h: u16,
+    /// The phone allows the graphics-card encoder.
+    pub hw_encoder: bool,
     pub tx: Seal,
     pub rx: Seal,
     pub device_name: String,
@@ -65,8 +72,16 @@ pub fn handshake(stream: &mut TcpStream, app: &App, approve: &dyn Fn(&str, u32) 
                 return Ok(Outcome::Rejected("paused"));
             }
             write_plain(stream, S_AUTH_RESULT, &[RESULT_OK])?;
+            let mut extra = Payload(&body[65..]);
+            let role = extra.u8().unwrap_or(0);
+            let (max_w, max_h) = (extra.u16().unwrap_or(0), extra.u16().unwrap_or(0));
+            let hw_encoder = extra.u8().is_none_or(|f| f & 1 != 0);
             Ok(Outcome::Session(Box::new(Login {
                 quality,
+                role,
+                max_w,
+                max_h,
+                hw_encoder,
                 tx: Seal::new(&crypto::derive(&device.key, b"s2c", &ns, nc)),
                 rx: Seal::new(&crypto::derive(&device.key, b"c2s", &ns, nc)),
                 device_name: device.name,
