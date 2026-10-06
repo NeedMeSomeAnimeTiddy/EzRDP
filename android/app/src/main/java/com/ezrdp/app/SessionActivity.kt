@@ -73,6 +73,7 @@ class SessionActivity : Activity(), ConnectionListener {
         liveHost = intent.getStringExtra("liveHost")
         port = intent.getIntExtra("livePort", pc.port)
         settings = Settings(this)
+        applyOrientation()
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -91,7 +92,7 @@ class SessionActivity : Activity(), ConnectionListener {
         keyInput = KeyInput(this, { conn }) { releaseModifiers() }
         root.addView(keyInput, FrameLayout.LayoutParams(1, 1))
 
-        controls = Controls(this, root, remote, { conn }, { keyInput.show() }) { releaseModifiers() }
+        controls = Controls(this, root, remote, { conn }, { keyInput.show() }, { nextMonitor() }) { releaseModifiers() }
         root.addOnLayoutChangeListener { _, l, t, r, b, ol, ot, or, ob ->
             if (r - l != or - ol || b - t != ob - ot) root.post { controls.relayout() }
         }
@@ -158,6 +159,18 @@ class SessionActivity : Activity(), ConnectionListener {
         }
         root.addView(doneEditing, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
 
+        // When the phone keyboard opens, shrink the PC picture to the space above it (instead of
+        // the keyboard covering half the screen), and give the full screen back when it closes.
+        root.setOnApplyWindowInsetsListener { _, insets ->
+            val ime = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) insets.getInsets(WindowInsets.Type.ime()).bottom else 0
+            val lp = remote.layoutParams as FrameLayout.LayoutParams
+            if (lp.bottomMargin != ime) {
+                lp.bottomMargin = ime
+                remote.layoutParams = lp
+                root.post { refreshLayout() }
+            }
+            insets
+        }
         setContentView(root)
         hideSystemBars()
     }
@@ -336,9 +349,42 @@ class SessionActivity : Activity(), ConnectionListener {
         }
     }
 
+    /** Re-measures and redraws everything (after the keyboard, rotation or coming back to the app). */
+    private fun refreshLayout() {
+        val root = remote.parent as? View ?: return
+        root.requestLayout()
+        root.invalidate()
+        remote.invalidate()
+        controls.relayout()
+    }
+
+    private fun applyOrientation() {
+        requestedOrientation = if (settings.landscape) {
+            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE
+        } else {
+            android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+    }
+
+    /** The on-screen "Screen" button: show the PC's next monitor. */
+    private fun nextMonitor() {
+        if (monitors.size < 2) {
+            android.widget.Toast.makeText(this, "This PC has only one screen", android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
+        val i = monitors.indexOfFirst { it.index == currentMonitor }
+        val next = monitors[(i + 1) % monitors.size]
+        chosenMonitor = next.index
+        conn?.selectMonitor(next.index)
+        android.widget.Toast.makeText(this, "Showing ${next.name}${if (next.primary) " (main)" else ""}", android.widget.Toast.LENGTH_SHORT).show()
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) hideSystemBars()
+        if (hasFocus) {
+            hideSystemBars()
+            remote.post { refreshLayout() }
+        }
     }
 
     // ---------- Connection lifecycle ----------
@@ -358,6 +404,7 @@ class SessionActivity : Activity(), ConnectionListener {
     override fun onResume() {
         super.onResume()
         if (!::pc.isInitialized) return
+        applyOrientation()
         remote.apply(settings)
         modeBtn.text = modeLabel()
         controls.build()
@@ -525,6 +572,23 @@ class SessionActivity : Activity(), ConnectionListener {
             if (internet.isNotEmpty()) pc.internet = internet
             pc.port = port
             store.save(pc)
+        }
+    }
+
+    override fun onBye(reason: Int) {
+        ui.post {
+            running = false
+            conn?.close()
+            conn = null
+            controls.release()
+            showStatus(
+                when (reason) {
+                    Msg.BYE_PAUSED -> "Connections were paused on ${pc.name}."
+                    Msg.BYE_REMOVED -> "${pc.name} no longer trusts this phone."
+                    else -> "${pc.name} ended the session."
+                },
+                "OK",
+            )
         }
     }
 

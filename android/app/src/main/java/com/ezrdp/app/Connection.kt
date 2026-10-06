@@ -28,6 +28,11 @@ object Msg {
     const val S_INFO = 0x0A
     const val S_PAIR_KEY = 0x0B
     const val S_PAIR_RESULT = 0x0C
+    const val S_BYE = 0x0D
+
+    const val BYE_ENDED = 0
+    const val BYE_PAUSED = 1
+    const val BYE_REMOVED = 2
 
     const val C_AUTH = 0x81
     const val C_MOUSE_ABS = 0x82
@@ -165,6 +170,8 @@ interface ConnectionListener {
     /** The PC's current home address, internet address and port, to remember for next time. */
     fun onAddresses(home: String, internet: String, port: Int) {}
     fun onDisconnected(error: Exception?)
+    /** The PC ended the session on purpose (BYE_*): don't reconnect. */
+    fun onBye(reason: Int) {}
 
     // While sharing this phone's screen, the PC sends these.
     /** action 0 = finger down, 1 = move, 2 = up; x/y are 0..1 of the phone screen. */
@@ -338,6 +345,7 @@ class Connection(
                 b.position(b.position() + netLen)
                 listener.onAddresses(home, net, b.short.toInt() and 0xffff)
             }
+            Msg.S_BYE -> listener.onBye(b.get().toInt())
             Msg.S_TOUCH -> {
                 val action = b.get().toInt()
                 listener.onTouch(action, b.float, b.float)

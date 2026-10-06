@@ -127,12 +127,34 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
         applyTransform()
     }
 
+    // Where the PC last said its pointer is (fractions of the screen).
+    private var remoteX = -1f
+    private var remoteY = -1f
+
+    /** After the finger stops, snap to the PC's real pointer position so the two never drift apart. */
+    private val resync = Runnable { applyRemoteCursor() }
+
+    private fun applyRemoteCursor() {
+        if (remoteX < 0 || videoW == 0) return
+        val wait = lastLocalMove + 350 - SystemClock.uptimeMillis()
+        if (wait > 0 || fingerDown) {
+            // Still moving it ourselves: check again shortly.
+            removeCallbacks(resync)
+            postDelayed(resync, if (wait > 0) wait else 100)
+            return
+        }
+        cursorX = remoteX * videoW
+        cursorY = remoteY * videoH
+        invalidate()
+    }
+
     fun setRemoteCursor(nx: Float, ny: Float, visible: Boolean) {
         cursorVisible = visible
-        // While the finger is moving the pointer we trust our own position (no jitter).
-        if (SystemClock.uptimeMillis() - lastLocalMove > 400) {
-            cursorX = nx * videoW
-            cursorY = ny * videoH
+        // A hidden pointer is reported at 0,0: keep the last real position.
+        if (visible) {
+            remoteX = nx
+            remoteY = ny
+            applyRemoteCursor()
         }
         invalidate()
     }
@@ -445,6 +467,7 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
             MotionEvent.ACTION_UP -> {
                 removeCallbacks(longPress)
                 fingerDown = false
+                postDelayed(resync, 400)
                 val now = SystemClock.uptimeMillis()
                 if (dragging) {
                     conn()?.button(0, false)
@@ -465,6 +488,7 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
             MotionEvent.ACTION_CANCEL -> {
                 removeCallbacks(longPress)
                 fingerDown = false
+                postDelayed(resync, 400)
                 if (dragging) conn()?.button(0, false)
                 dragging = false
                 two = Two.NONE

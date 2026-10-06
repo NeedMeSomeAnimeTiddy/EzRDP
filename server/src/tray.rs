@@ -216,7 +216,7 @@ fn handle(app: &App, cmd: usize, devices: &[crate::trust::Device]) {
             let now = !app.paused();
             app.paused.store(now, Relaxed);
             if now {
-                crate::server::hang_up();
+                crate::session::end(crate::protocol::BYE_PAUSED);
             }
             app.changed();
         }
@@ -259,7 +259,7 @@ fn handle(app: &App, cmd: usize, devices: &[crate::trust::Device]) {
                 if message(&q, MB_YESNO | MB_ICONWARNING) == IDYES {
                     app.trusted.lock().unwrap().remove(&d.id);
                     if app.connected.lock().unwrap().as_deref() == Some(d.name.as_str()) {
-                        crate::server::hang_up();
+                        crate::session::end(crate::protocol::BYE_REMOVED);
                     }
                 }
             }

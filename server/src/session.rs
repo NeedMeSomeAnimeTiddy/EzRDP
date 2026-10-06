@@ -30,6 +30,7 @@ pub struct Shared {
     /// Biggest picture the phone can show, and whether the graphics-card encoder may be used.
     max_size: (usize, usize),
     hw_encoder: AtomicBool,
+    phone_name: String,
 }
 
 impl Shared {
@@ -38,11 +39,31 @@ impl Shared {
     }
 }
 
+/// The connected phone's sender, so the PC side can say goodbye before hanging up.
+static CURRENT: Mutex<Option<Arc<Sender>>> = Mutex::new(None);
+
+/// Ends the session from the PC: tells the phone why (so it doesn't reconnect), then hangs up.
+pub fn end(reason: u8) {
+    let tx = CURRENT.lock().unwrap().take();
+    // On its own thread: a slow network mustn't freeze the tray menu.
+    std::thread::spawn(move || {
+        if let Some(tx) = tx {
+            let _ = tx.send(S_BYE, &[reason]);
+        }
+        crate::server::hang_up();
+    });
+}
+
+fn end_from_banner() {
+    end(BYE_ENDED);
+}
+
 /// Runs a session until the phone disconnects or the socket is shut down (new phone / Pause).
 pub fn run(stream: TcpStream, login: Login, info: Vec<u8>, _app: Arc<crate::state::App>) {
     let shared = new_shared(&login);
     let tx = Arc::new(Sender::new(stream.try_clone().unwrap(), login.tx));
     shared.quality.store(login.quality, Relaxed);
+    *CURRENT.lock().unwrap() = Some(tx.clone());
     let _ = tx.send(S_INFO, &info);
 
     // Start on the screen the mouse is on: that's where the person was working.
@@ -88,6 +109,13 @@ pub fn run(stream: TcpStream, login: Login, info: Vec<u8>, _app: Arc<crate::stat
     let _ = video.join();
     let _ = audio.join();
     let _ = pinger.join();
+    crate::overlay::hide();
+    {
+        let mut cur = CURRENT.lock().unwrap();
+        if cur.as_ref().is_some_and(|t| Arc::ptr_eq(t, &tx)) {
+            *cur = None;
+        }
+    }
     unsafe {
         windows::Win32::Media::timeEndPeriod(1);
     }
@@ -105,6 +133,7 @@ fn new_shared(login: &Login) -> Arc<Shared> {
         current: Mutex::new(None),
         max_size: (login.max_w as usize, login.max_h as usize),
         hw_encoder: AtomicBool::new(login.hw_encoder),
+        phone_name: login.device_name.clone(),
     })
 }
 
@@ -271,6 +300,7 @@ fn video_loop(tx: &Sender, shared: &Shared) {
         last_error = None;
         let m = cap.monitor().clone();
         *shared.current.lock().unwrap() = Some(m.clone());
+        crate::overlay::show(&shared.phone_name, &m, end_from_banner);
         let scale = pick_scale(&m, q, shared.max_size);
         let (vw, vh) = out_size(m.w as usize, m.h as usize, scale);
         let mut enc = match Video::open(vw, vh, q, shared.hw_encoder.load(Relaxed)) {
@@ -293,6 +323,7 @@ fn video_loop(tx: &Sender, shared: &Shared) {
         let mut have_image = false;
         let mut last_sent = Instant::now() - min_gap;
         let mut last_cursor = None;
+        let mut last_cursor_sent = Instant::now();
         let mut need_send = false;
         // After the screen stops changing, re-encode a few times so the picture sharpens up.
         let mut refine_left = 0;
@@ -325,8 +356,10 @@ fn video_loop(tx: &Sender, shared: &Shared) {
             }
 
             let cur = cursor().map(|(x, y)| ((x - m.x) as f32 / m.w as f32, (y - m.y) as f32 / m.h as f32));
-            if cur != last_cursor {
+            // Also resend now and then, so the phone's pointer can't stay out of step.
+            if cur != last_cursor || last_cursor_sent.elapsed() > Duration::from_millis(500) {
                 last_cursor = cur;
+                last_cursor_sent = Instant::now();
                 let (x, y) = cur.unwrap_or((0.0, 0.0));
                 let mut p = x.to_be_bytes().to_vec();
                 p.extend_from_slice(&y.to_be_bytes());

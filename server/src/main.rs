@@ -29,6 +29,8 @@ mod hwenc;
 #[cfg(windows)]
 mod input;
 #[cfg(windows)]
+mod overlay;
+#[cfg(windows)]
 mod phone_view;
 #[cfg(windows)]
 mod session;

@@ -49,6 +49,10 @@ class Settings(context: Context) {
     var sound: Boolean
         get() = p.getBoolean("sound", false)
         set(v) = p.edit().putBoolean("sound", v).apply()
+    /** Turn the phone sideways while connected (the PC screen is wide). */
+    var landscape: Boolean
+        get() = p.getBoolean("landscape", true)
+        set(v) = p.edit().putBoolean("landscape", v).apply()
     /** Let the PC encode video on its graphics card (faster; turn off if the picture breaks). */
     var gpuEncoder: Boolean
         get() = p.getBoolean("gpuEncoder", true)

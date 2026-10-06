@@ -24,6 +24,11 @@ pub const S_PING: u8 = 0x09; // (empty) keep-alive so the phone can spot dead co
 pub const S_INFO: u8 = 0x0A; // home ip (u8 len + utf8), internet ip (u8 len + utf8), port u16
 pub const S_PAIR_KEY: u8 = 0x0B; // PC public key [65]
 pub const S_PAIR_RESULT: u8 = 0x0C; // RESULT_* u8, then device id [16] if ok
+pub const S_BYE: u8 = 0x0D; // BYE_* u8: the PC ended the session on purpose (don't reconnect)
+
+pub const BYE_ENDED: u8 = 0; // someone at the PC clicked disconnect
+pub const BYE_PAUSED: u8 = 1; // connections were paused
+pub const BYE_REMOVED: u8 = 2; // this phone is no longer trusted
 
 // Client -> server
 pub const C_AUTH: u8 = 0x81; // device id [16], nonce [16], proof [32], quality u8, role u8, max w u16, max h u16, flags u8 (1 = graphics-card encoder ok)

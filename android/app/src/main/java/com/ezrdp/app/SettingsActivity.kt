@@ -46,6 +46,10 @@ class SettingsActivity : Activity() {
         note("Off: tapping only moves the pointer; the on-screen buttons click.")
         slider("Pointer size", s.cursorSize, 0.6f, 2.5f, "x") { s.cursorSize = it }
 
+        section("Screen")
+        toggle("Turn sideways when connected", s.landscape) { s.landscape = it }
+        note("The PC screen is wide, so the phone switches to landscape. Turn off to rotate freely.")
+
         section("Scrolling")
         slider("Scroll speed", s.scrollSpeed, 0.3f, 3f, "x") { s.scrollSpeed = it }
         toggle("Reverse scroll direction", s.invertScroll) { s.invertScroll = it }

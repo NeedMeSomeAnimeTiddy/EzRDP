@@ -11,7 +11,6 @@ import android.view.View
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
-import kotlin.math.abs
 
 /**
  * Game-style on-screen controls: mouse buttons, scroll wheel, zoom and quick buttons.
@@ -24,6 +23,8 @@ class Controls(
     private val remote: RemoteView,
     private val conn: () -> Connection?,
     private val onKeyboard: () -> Unit,
+    /** Switch to the next PC monitor. */
+    private val onScreens: () -> Unit,
     private val onClick: () -> Unit,
 ) {
     private val s = Settings(ctx)
@@ -148,20 +149,29 @@ class Controls(
         }
     }
 
-    /** Acts the moment it's pressed, then keeps repeating while held. */
-    private fun repeatButton(label: String, w: Int, first: () -> Unit, again: () -> Unit) = round(label, w).apply {
+    /**
+     * Acts the moment it's pressed, then keeps repeating while held (after [delay] ms,
+     * every [every] ms, speeding up a little the longer it's held). A wobbly thumb doesn't stop it.
+     */
+    private fun repeatButton(
+        label: String, w: Int, h: Int = w, delay: Long = 300, every: Long = 40,
+        first: () -> Unit, again: () -> Unit,
+    ) = round(label, w, h).apply {
+        var count = 0
         val repeat = object : Runnable {
             override fun run() {
                 again()
-                postDelayed(this, 40)
+                count++
+                postDelayed(this, (every - count * 2).coerceAtLeast(every / 2))
             }
         }
         setOnTouchListener { v, e ->
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     press(this, true)
+                    count = 0
                     first()
-                    postDelayed(repeat, 300)
+                    postDelayed(repeat, delay)
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     press(this, false)
@@ -173,59 +183,31 @@ class Controls(
         }
     }
 
-    /**
-     * Drag up/down on it like a mouse wheel. Tap the top/bottom half to scroll one step;
-     * hold it there to keep scrolling (it speeds up the longer you hold).
-     */
-    private fun wheel(w: Int, h: Int) = round("▲\n\n≡\n\n▼", w, h, 13f).apply {
+    private fun notch() = (120 * s.scrollSpeed).toInt().coerceAtLeast(40)
+
+    /** The middle of the wheel: drag it up/down like rolling a mouse wheel. */
+    private fun wheelStrip(w: Int, h: Int) = round("≡", w, h, 15f).apply {
         var lastY = 0f
-        var downY = 0f
-        var moved = false
         var acc = 0f
-        var dir = 0
-        var steps = 0
-        val repeat = object : Runnable {
-            override fun run() {
-                if (moved) return
-                conn()?.scroll(dir * (120 * s.scrollSpeed).toInt().coerceAtLeast(40), 0)
-                steps++
-                postDelayed(this, (110L - steps * 6).coerceAtLeast(35L))
-            }
-        }
-        setOnTouchListener { _, e ->
+        setOnTouchListener { v, e ->
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     press(this, true)
-                    lastY = e.y; downY = e.y; moved = false; acc = 0f; steps = 0
-                    dir = if (e.y < height / 2f) 1 else -1
-                    postDelayed(repeat, 280)
+                    lastY = e.y; acc = 0f
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (abs(e.y - downY) > ctx.dp(6)) {
-                        moved = true
-                        removeCallbacks(repeat)
-                    }
-                    if (moved) {
-                        // Finger up = scroll up, like rolling a wheel forward. 20 dp = one notch.
-                        acc += (lastY - e.y) / ctx.resources.displayMetrics.density * 6f * s.scrollSpeed
-                        val n = acc.toInt()
-                        if (n != 0) {
-                            conn()?.scroll(n, 0)
-                            acc -= n
-                        }
+                    // Finger up = scroll up, like rolling a wheel forward. 20 dp = one notch.
+                    acc += (lastY - e.y) / ctx.resources.displayMetrics.density * 6f * s.scrollSpeed
+                    val n = acc.toInt()
+                    if (n != 0) {
+                        conn()?.scroll(n, 0)
+                        acc -= n
                     }
                     lastY = e.y
                 }
-                MotionEvent.ACTION_UP -> {
-                    press(this, false)
-                    removeCallbacks(repeat)
-                    if (!moved && steps == 0) conn()?.scroll(dir * 120, 0)
-                }
-                MotionEvent.ACTION_CANCEL -> {
-                    press(this, false)
-                    removeCallbacks(repeat)
-                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> press(this, false)
             }
+            v.parent.requestDisallowInterceptTouchEvent(!editing)
             true
         }
     }
@@ -252,17 +234,21 @@ class Controls(
         val buttons = if (s.leftHanded) listOf(right, middle, left) else listOf(left, middle, right)
         buttons.forEach { mouse.addView(it) }
 
+        // Scroll: hold ▲ or ▼ to keep scrolling, or drag the middle like a wheel.
         val wheelGroup = Group("wheel", 1f, if (tall) 0.62f else 0.45f, vertical = true)
-        wheelGroup.addView(wheel(b, (b * 2.6).toInt()))
+        wheelGroup.addView(repeatButton("▲", b, delay = 350, every = 90, first = { conn()?.scroll(notch(), 0) }) { conn()?.scroll(notch(), 0) })
+        wheelGroup.addView(wheelStrip(b, (b * 1.1).toInt()))
+        wheelGroup.addView(repeatButton("▼", b, delay = 350, every = 90, first = { conn()?.scroll(-notch(), 0) }) { conn()?.scroll(-notch(), 0) })
 
         val zoom = Group("zoom", 0f, if (tall) 0.3f else 0.38f, vertical = true)
-        zoom.addView(repeatButton("+", b, { remote.zoomBy(1.25f) }) { remote.zoomBy(1.05f) })
-        zoom.addView(repeatButton("−", b, { remote.zoomBy(1 / 1.25f) }) { remote.zoomBy(1 / 1.05f) })
+        zoom.addView(repeatButton("+", b, first = { remote.zoomBy(1.25f) }) { remote.zoomBy(1.05f) })
+        zoom.addView(repeatButton("−", b, first = { remote.zoomBy(1 / 1.25f) }) { remote.zoomBy(1 / 1.05f) })
         zoom.addView(tapButton("Fit", b) { remote.resetZoom() }.apply { shrink(0.8f) })
 
         // Upright screens are narrow: stack these so they don't run into the mouse buttons.
         val quick = Group("quick", 0f, if (tall) 0.78f else 1f, vertical = tall)
         quick.addView(tapButton("⌨", b) { onKeyboard() })
+        quick.addView(tapButton("Screen", b) { onScreens() }.apply { shrink(0.7f) })
         dragLockView = tapButton("Hold", b) { setDragLock(!dragLock) }.apply { shrink(0.75f) }
         quick.addView(dragLockView)
         quick.addView(tapButton("Hide", b) { setHidden(!hidden) }.apply {

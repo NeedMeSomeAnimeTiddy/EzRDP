@@ -26,9 +26,11 @@ Game-style buttons sit over the picture (move them with ☰ → **Edit layout**)
 | Button | What it does |
 |---|---|
 | **L / M / R** | Left, middle, right mouse button. Hold one and drag with another finger to drag things. |
-| **Wheel** (▲ ≡ ▼) | Drag up/down like a mouse wheel. Tap the top/bottom for one step, hold it to keep scrolling. |
+| **▲ / ▼** | Scroll one step; hold to keep scrolling. |
+| **≡** (between them) | Drag up/down like a mouse wheel. |
 | **+ / − / Fit** | Zoom in/out around the pointer (hold to keep zooming), or back to the whole screen. While zoomed, push the pointer to an edge and the view glides that way. |
-| **⌨** | Phone keyboard. |
+| **⌨** | Phone keyboard (the PC picture shrinks to fit above it). |
+| **Screen** | Switch to the PC's next monitor. |
 | **Hold** | Keeps the left button pressed until you tap it again (easy dragging). |
 | **Hide / Show** | Hides the buttons for a clean view. |
 
@@ -36,7 +38,12 @@ Game-style buttons sit over the picture (move them with ☰ → **Edit layout**)
 click, scroll speed and direction, button size and visibility, left-handed layout, vibration,
 quality and sound.
 
+The phone turns sideways when you connect (Settings → Screen to turn that off).
 Upright and sideways screens each have their own button layout.
+
+While a phone is connected, the PC shows a blue frame around the screen being viewed and a
+banner at the top ("… is controlling this PC"). Click the banner to disconnect the phone.
+Windows 10 (2004+) and 11 keep the frame and banner out of what the phone sees.
 
 ### Gestures (Both mode)
 
