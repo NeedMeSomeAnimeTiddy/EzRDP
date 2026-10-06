@@ -180,6 +180,46 @@ fn main() {
     server::listen(app, approve, session).unwrap();
 }
 
+/// Closes the copy of EzRDP that's already running and waits until it's gone.
+/// Asks nicely first; older versions don't know how to quit on request, so they're ended.
+#[cfg(windows)]
+fn take_over(mutex: windows::Win32::Foundation::HANDLE) -> bool {
+    use windows::Win32::Foundation::*;
+    use windows::Win32::System::Threading::*;
+    use windows::Win32::UI::Shell::*;
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    use windows::core::w;
+    unsafe {
+        let got = |ms| {
+            let r = WaitForSingleObject(mutex, ms);
+            r == WAIT_OBJECT_0 || r == WAIT_ABANDONED
+        };
+        let Ok(old) = FindWindowW(w!("EzRDPTray"), None) else {
+            return got(5000);
+        };
+        // Look this up first: older versions destroy the window when asked to close.
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(old, Some(&mut pid));
+        let _ = PostMessageW(Some(old), WM_CLOSE, WPARAM(0), LPARAM(0));
+        if got(3000) {
+            return true;
+        }
+        if let Ok(p) = OpenProcess(PROCESS_TERMINATE, false, pid) {
+            let _ = TerminateProcess(p, 0);
+            let _ = CloseHandle(p);
+        }
+        // Remove the old copy's tray icon so it doesn't linger.
+        let data = NOTIFYICONDATAW {
+            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: old,
+            uID: 1,
+            ..Default::default()
+        };
+        let _ = Shell_NotifyIconW(NIM_DELETE, &data);
+        got(5000)
+    }
+}
+
 #[cfg(windows)]
 fn main() {
     use std::time::Duration;
@@ -196,10 +236,19 @@ fn main() {
     }
 
     unsafe {
-        let _ = CreateMutexW(None, true, w!("Local\\EzRDP"));
+        let mutex = CreateMutexW(None, true, w!("Local\\EzRDP"));
         if GetLastError() == ERROR_ALREADY_EXISTS {
-            MessageBoxW(None, w!("EzRDP is already running. Look for its icon near the clock."), w!("EzRDP"), MB_OK);
-            return;
+            // Another copy is running (usually the old version after an update): replace it.
+            let Ok(mutex) = mutex else { return };
+            if !take_over(mutex) {
+                MessageBoxW(
+                    None,
+                    w!("EzRDP is already running and couldn't be closed. Right-click its icon near the clock, choose Quit, then start EzRDP again."),
+                    w!("EzRDP"),
+                    MB_OK,
+                );
+                return;
+            }
         }
         use windows::Win32::UI::HiDpi::*;
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -207,7 +256,9 @@ fn main() {
     log::init();
 
     let cfg = load_config();
-    if !cfg.first_run_done {
+    // First run: start with Windows. Later runs: keep "start with Windows" pointing at this
+    // copy, in case it was moved or replaced.
+    if !cfg.first_run_done || autostart::enabled() {
         autostart::set(true);
     }
     let app = new_app(&cfg);

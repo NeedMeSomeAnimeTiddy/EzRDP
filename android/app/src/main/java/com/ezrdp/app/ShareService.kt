@@ -127,7 +127,7 @@ class ShareService : Service(), ConnectionListener {
             ui.post {
                 val why = when (error) {
                     is PausedException -> "Connections are paused on ${pc.name}."
-                    is VersionException -> "Update EzRDP on the PC and phone to the same version."
+                    is VersionException -> (error as VersionException).advice(pc.name)
                     is NotTrustedException -> "${pc.name} no longer trusts this phone."
                     else -> "Can't reach ${pc.name}."
                 }

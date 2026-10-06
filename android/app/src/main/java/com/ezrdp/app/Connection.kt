@@ -78,7 +78,17 @@ data class MonitorInfo(val index: Int, val primary: Boolean, val width: Int, val
 
 /** The PC no longer trusts this phone (it was removed on the PC). */
 class NotTrustedException : IOException("Not trusted")
-class VersionException : IOException("Version mismatch")
+class VersionException(val pcVersion: Int) : IOException("Version mismatch") {
+    /** What to tell the person, depending on which side is out of date. */
+    fun advice(pcName: String): String = if (pcVersion < Msg.VERSION) {
+        "$pcName is running an older EzRDP (version $pcVersion; this phone has version ${Msg.VERSION}).\n\n" +
+            "On the PC, run the new EzRDP.exe. It closes the old one by itself. " +
+            "If you put the new file in a different folder, delete the old one so Windows doesn't start it again."
+    } else {
+        "$pcName has a newer EzRDP (version $pcVersion; this phone has version ${Msg.VERSION}).\n\n" +
+            "Install the new EzRDP app on this phone."
+    }
+}
 class PausedException : IOException("Paused")
 /** Something answered at this address, but it's a different PC. */
 class WrongPcException : IOException("Different PC")
@@ -136,7 +146,7 @@ internal fun writePlain(output: java.io.OutputStream, type: Int, payload: ByteAr
 internal fun readHello(input: DataInputStream): Hello {
     val (type, body) = readPlain(input)
     if (type != Msg.S_HELLO || body.isEmpty()) throw IOException("Not an EzRDP PC")
-    if (body[0].toInt() != Msg.VERSION) throw VersionException()
+    if (body[0].toInt() != Msg.VERSION) throw VersionException(body[0].toInt() and 0xff)
     val b = ByteBuffer.wrap(body, 1, body.size - 1)
     val id = ByteArray(16).also { b.get(it) }
     val nonce = ByteArray(16).also { b.get(it) }

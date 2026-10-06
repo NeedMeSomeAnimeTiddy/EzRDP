@@ -225,8 +225,9 @@ fn handle(app: &App, cmd: usize, devices: &[crate::trust::Device]) {
             let home = crate::server::lan_ip().map(|i| i.to_string()).unwrap_or("unknown".into());
             let net = app.public_ip.lock().unwrap().map(|i| i.to_string()).unwrap_or("unknown".into());
             let text = format!(
-                "PC name: {}\nHome address: {home}\nInternet address: {net}\nPort: {}\n{}\nTrusted phones: {}\n\n\
+                "EzRDP version {}\nPC name: {}\nHome address: {home}\nInternet address: {net}\nPort: {}\n{}\nTrusted phones: {}\n\n\
                  Phones don't need any of this: they find the PC by themselves.",
+                crate::protocol::VERSION,
                 app.pc_name,
                 app.port,
                 EXTRA_INFO.lock().unwrap(),
@@ -291,6 +292,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 unsafe {
                     let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
                 }
+            }
+            LRESULT(0)
+        }
+        WM_CLOSE => {
+            // A newer copy of EzRDP is starting and asked this one to step aside.
+            unsafe {
+                let data = icon_data(app);
+                let _ = Shell_NotifyIconW(NIM_DELETE, &data);
+                PostQuitMessage(0);
             }
             LRESULT(0)
         }

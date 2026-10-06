@@ -459,7 +459,7 @@ class SessionActivity : Activity(), ConnectionListener {
                         fail("${pc.name} no longer trusts this phone. Add it again from the list while you're on the same Wi-Fi.")
                     }
                     is PausedException -> fail("Connections are paused on ${pc.name}. Right-click the EzRDP icon on the PC and choose Resume.")
-                    is VersionException -> fail("The PC and phone apps are different versions. Update both.")
+                    is VersionException -> fail((lastError as VersionException).advice(pc.name))
                     else -> retry()
                 }
             }

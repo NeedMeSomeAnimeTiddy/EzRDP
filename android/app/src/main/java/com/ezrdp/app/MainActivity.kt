@@ -146,6 +146,8 @@ class MainActivity : Activity() {
         for (pc in saved) {
             val live = found[pc.id]
             val sub = when {
+                live != null && live.version < Msg.VERSION -> "Older EzRDP on the PC · run the new EzRDP.exe there"
+                live != null && live.version > Msg.VERSION -> "Newer EzRDP on the PC · update this app"
                 live?.paused == true -> "Paused on the PC"
                 live != null -> "On this Wi-Fi · tap to connect"
                 pc.internet.isNotEmpty() || pc.manual.isNotEmpty() -> "Away from home · tap to connect"
@@ -173,7 +175,12 @@ class MainActivity : Activity() {
         foundList.removeAllViews()
         val fresh = found.values.filter { f -> saved.none { it.id == f.id } }
         for (f in fresh) {
-            val sub = if (f.paused) "Paused on the PC" else "New · tap to add this PC"
+            val sub = when {
+                f.version < Msg.VERSION -> "Older EzRDP on this PC · run the new EzRDP.exe there"
+                f.version > Msg.VERSION -> "Newer EzRDP on this PC · update this app"
+                f.paused -> "Paused on the PC"
+                else -> "New · tap to add this PC"
+            }
             foundList.addView(card(f.name, sub, { pair(f.host, f.port) }))
         }
         foundLabel.visibility = if (fresh.isEmpty()) View.GONE else View.VISIBLE
@@ -302,7 +309,7 @@ class MainActivity : Activity() {
                 "The PC is busy adding another phone. Try again in a moment."
             e is Pairing.Refused && e.reason == Msg.RESULT_PAUSED ->
                 "Connections are paused on the PC. Right-click the EzRDP icon on the PC and choose Resume."
-            e is VersionException -> "The PC and phone apps are different versions. Update both."
+            e is VersionException -> e.advice("The PC")
             e is java.net.SocketTimeoutException -> "No answer on the PC in time. Try again."
             else -> "Couldn't reach the PC at $host. Is EzRDP running on it?"
         }
