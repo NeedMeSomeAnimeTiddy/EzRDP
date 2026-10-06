@@ -545,8 +545,9 @@ class SessionActivity : Activity(), ConnectionListener {
     override fun onVideoConfig(monitor: Int, width: Int, height: Int) {
         decoder.configure(width, height)
         ui.post {
+            val newScreen = monitor != currentMonitor
             currentMonitor = monitor
-            remote.setVideoSize(width, height)
+            remote.setVideoSize(width, height, newScreen)
         }
     }
 

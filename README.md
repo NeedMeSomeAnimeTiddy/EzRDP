@@ -42,7 +42,8 @@ The phone turns sideways when you connect (Settings → Screen to turn that off)
 Upright and sideways screens each have their own button layout.
 
 While a phone is connected, the PC shows a blue frame around the screen being viewed and a
-banner at the top ("… is controlling this PC"). Click the banner to disconnect the phone.
+banner at the top ("… is controlling this PC"). Click the banner, or press **Ctrl+Esc** on the
+PC's keyboard, to disconnect the phone. (Ctrl+Esc sent from the phone still opens Start as usual.)
 Windows 10 (2004+) and 11 keep the frame and banner out of what the phone sees.
 
 ### Gestures (Both mode)

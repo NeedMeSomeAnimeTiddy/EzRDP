@@ -55,7 +55,7 @@ fn text() -> String {
         .lock()
         .unwrap()
         .as_ref()
-        .map(|(n, _)| format!("{n} is controlling this PC  ·  click here to disconnect"))
+        .map(|(n, _)| format!("{n} is controlling this PC  ·  click here or press Ctrl+Esc to disconnect"))
         .unwrap_or_default()
 }
 

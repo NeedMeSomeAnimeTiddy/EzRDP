@@ -41,7 +41,18 @@ fn info(app: &App) -> Vec<u8> {
 }
 
 pub fn listen(app: Arc<App>, approve: Approve, run: RunSession) -> std::io::Result<()> {
-    let listener = TcpListener::bind(("0.0.0.0", app.port))?;
+    // Retry for a bit: right after an update the old copy may still be letting go of the port.
+    let mut tries = 0;
+    let listener = loop {
+        match TcpListener::bind(("0.0.0.0", app.port)) {
+            Ok(l) => break l,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && tries < 20 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(e) => return Err(e),
+        }
+    };
     for conn in listener.incoming() {
         let Ok(mut stream) = conn else { continue };
         let app = app.clone();

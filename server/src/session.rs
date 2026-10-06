@@ -54,6 +54,11 @@ pub fn end(reason: u8) {
     });
 }
 
+/// A phone is controlling this PC right now.
+pub fn active() -> bool {
+    CURRENT.lock().unwrap().is_some()
+}
+
 fn end_from_banner() {
     end(BYE_ENDED);
 }
@@ -282,6 +287,7 @@ fn video_loop(tx: &Sender, shared: &Shared) {
     wake_displays();
     let mut frame_id: u32 = 0;
     let mut last_error: Option<String> = None;
+    let mut last_monitor = None;
     'outer: while !shared.stopped() {
         let generation = shared.generation.load(Relaxed);
         let q = quality(shared.quality.load(Relaxed));
@@ -300,6 +306,12 @@ fn video_loop(tx: &Sender, shared: &Shared) {
         last_error = None;
         let m = cap.monitor().clone();
         *shared.current.lock().unwrap() = Some(m.clone());
+        // Switched to another monitor: bring the mouse along, so it's where the phone is looking.
+        let index = shared.monitor.load(Relaxed);
+        if last_monitor.is_some_and(|i| i != index) {
+            crate::input::bring_onto(&m);
+        }
+        last_monitor = Some(index);
         crate::overlay::show(&shared.phone_name, &m, end_from_banner);
         let scale = pick_scale(&m, q, shared.max_size);
         let (vw, vh) = out_size(m.w as usize, m.h as usize, scale);
@@ -310,7 +322,6 @@ fn video_loop(tx: &Sender, shared: &Shared) {
                 break;
             }
         };
-        let index = shared.monitor.load(Relaxed);
         let mut cfg = vec![index];
         cfg.extend_from_slice(&(vw as u16).to_be_bytes());
         cfg.extend_from_slice(&(vh as u16).to_be_bytes());

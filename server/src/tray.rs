@@ -312,6 +312,30 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
 }
 
+/// Whether Ctrl is held on the PC's real keyboard (keys from the phone don't count).
+static REAL_CTRL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Watches the real keyboard for Ctrl+Esc while a phone is connected. Keys the phone sends
+/// are marked as injected and ignored, so the phone can still use Ctrl+Esc to open Start.
+unsafe extern "system" fn key_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32 {
+        let k = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+        let injected = k.flags.0 & LLKHF_INJECTED.0 != 0;
+        let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+        if !injected {
+            match k.vkCode {
+                0x11 | 0xA2 | 0xA3 => REAL_CTRL.store(down, Relaxed), // Ctrl, left/right Ctrl
+                0x1B if down && REAL_CTRL.load(Relaxed) && crate::session::active() => {
+                    crate::session::end(crate::protocol::BYE_ENDED);
+                    return LRESULT(1); // swallow it, so the Start menu doesn't open
+                }
+                _ => {}
+            }
+        }
+    }
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
 /// Runs the tray until Quit. Must be called on the main thread.
 pub fn run(app: Arc<App>) {
     let _ = APP.set(app.clone());
@@ -344,6 +368,8 @@ pub fn run(app: Arc<App>) {
         let _ = TASKBAR_CREATED.set(RegisterWindowMessageW(w!("TaskbarCreated")));
         let _ = ICONS.set((make_icon(0xFF4F8CFF).0 as isize, make_icon(0xFF8A8F98).0 as isize));
         add_icon(&app);
+        // Ctrl+Esc on the PC's own keyboard ends the phone's session.
+        let _ = SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_hook), Some(instance), 0);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {

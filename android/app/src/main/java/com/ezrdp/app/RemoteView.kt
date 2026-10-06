@@ -114,8 +114,13 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
 
     // ---------- Video geometry ----------
 
-    fun setVideoSize(w: Int, h: Int) {
-        if (w == videoW && h == videoH) return
+    /** New picture size. [newScreen] = a different PC monitor, so start fresh even if it's the same size. */
+    fun setVideoSize(w: Int, h: Int, newScreen: Boolean = false) {
+        if (w == videoW && h == videoH && !newScreen) return
+        // Forget the old screen's pointer; the PC sends the new one straight away.
+        hasRemote = false
+        lastLocalMove = 0
+        removeCallbacks(resync)
         videoW = w
         videoH = h
         video.holder.setFixedSize(w, h)
@@ -128,14 +133,17 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
     }
 
     // Where the PC last said its pointer is (fractions of the screen).
-    private var remoteX = -1f
-    private var remoteY = -1f
+    private var remoteX = 0f
+    private var remoteY = 0f
+    private var hasRemote = false
+    /** False when the PC's pointer is on a different monitor than the one shown. */
+    private var onThisScreen = true
 
     /** After the finger stops, snap to the PC's real pointer position so the two never drift apart. */
     private val resync = Runnable { applyRemoteCursor() }
 
     private fun applyRemoteCursor() {
-        if (remoteX < 0 || videoW == 0) return
+        if (!hasRemote || videoW == 0) return
         val wait = lastLocalMove + 350 - SystemClock.uptimeMillis()
         if (wait > 0 || fingerDown) {
             // Still moving it ourselves: check again shortly.
@@ -143,8 +151,10 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
             postDelayed(resync, if (wait > 0) wait else 100)
             return
         }
-        cursorX = remoteX * videoW
-        cursorY = remoteY * videoH
+        // The pointer may be on another monitor (fractions outside 0..1): then don't draw it.
+        onThisScreen = remoteX in 0f..1f && remoteY in 0f..1f
+        cursorX = remoteX.coerceIn(0f, 1f) * videoW
+        cursorY = remoteY.coerceIn(0f, 1f) * videoH
         invalidate()
     }
 
@@ -154,6 +164,7 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
         if (visible) {
             remoteX = nx
             remoteY = ny
+            hasRemote = true
             applyRemoteCursor()
         }
         invalidate()
@@ -286,7 +297,7 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
 
     override fun dispatchDraw(canvas: Canvas) {
         super.dispatchDraw(canvas)
-        if (videoW == 0 || !cursorVisible) return
+        if (videoW == 0 || !cursorVisible || !onThisScreen) return
         canvas.save()
         canvas.translate(tx + cursorX * scale, ty + cursorY * scale)
         val s = dp * 1.1f * cursorScale
@@ -355,6 +366,7 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
         if (videoW == 0) return
         cursorX = x.coerceIn(0f, videoW - 1f)
         cursorY = y.coerceIn(0f, videoH - 1f)
+        onThisScreen = true
         lastLocalMove = SystemClock.uptimeMillis()
         conn()?.mouseAbs(cursorX / videoW, cursorY / videoH)
         invalidate()
@@ -372,6 +384,7 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
         val nx = (cursorX + dx).coerceIn(0f, videoW - 1f)
         val ny = (cursorY + dy).coerceIn(0f, videoH - 1f)
         conn()?.mouseRel((nx - cursorX) / videoW, (ny - cursorY) / videoH)
+        onThisScreen = true
         cursorX = nx
         cursorY = ny
         lastLocalMove = SystemClock.uptimeMillis()
@@ -383,7 +396,7 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
         val px = tx + cursorX * scale
         val py = ty + cursorY * scale
         // The arrow's tip is at the top-left; aim a little below-right of it.
-        return cursorVisible && hypot(x - (px + 6 * dp), y - (py + 10 * dp)) < 34 * dp
+        return cursorVisible && onThisScreen && hypot(x - (px + 6 * dp), y - (py + 10 * dp)) < 34 * dp
     }
 
     @SuppressLint("ClickableViewAccessibility")
