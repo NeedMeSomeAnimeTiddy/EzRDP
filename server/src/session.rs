@@ -1,6 +1,6 @@
 //! One connected phone: auth, then a video thread, an audio thread and an input loop.
 
-use crate::capture::{CapError, Capturer, Monitor, monitors};
+use crate::capture::{CapError, Monitor, Source, monitors};
 use crate::convert::{Yuv, out_size};
 use crate::encoder::{H264, quality, scale_for};
 use crate::input::{Input, cursor, wake_displays};
@@ -175,18 +175,23 @@ fn video_loop(tx: &Sender, shared: &Shared) {
     }
     wake_displays();
     let mut frame_id: u32 = 0;
+    let mut last_error: Option<String> = None;
     'outer: while !shared.stopped() {
         let generation = shared.generation.load(Relaxed);
         let q = quality(shared.quality.load(Relaxed));
-        let mut cap = match Capturer::new(shared.monitor.load(Relaxed) as usize) {
+        let mut cap = match Source::open(shared.monitor.load(Relaxed) as usize) {
             Ok(c) => c,
             Err(e) => {
                 // Happens briefly on the lock screen, UAC prompts and display changes.
-                eprintln!("capture unavailable: {e}");
+                if last_error.as_deref() != Some(e.as_str()) {
+                    eprintln!("capture unavailable: {e}");
+                    last_error = Some(e);
+                }
                 std::thread::sleep(Duration::from_millis(500));
                 continue;
             }
         };
+        last_error = None;
         let mut enc = match H264::new(q) {
             Ok(e) => e,
             Err(e) => {
@@ -194,7 +199,7 @@ fn video_loop(tx: &Sender, shared: &Shared) {
                 break;
             }
         };
-        let m = cap.monitor.clone();
+        let m = cap.monitor().clone();
         *shared.current.lock().unwrap() = Some(m.clone());
         let scale = scale_for(m.w as usize, q.max_width);
         let (vw, vh) = out_size(m.w as usize, m.h as usize, scale);

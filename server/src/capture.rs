@@ -214,3 +214,145 @@ fn rotate(rot: DXGI_MODE_ROTATION, src: &[u8], pitch: usize, w: usize, h: usize,
     }
     Some((dw, dh))
 }
+
+/// Backup capture using plain GDI screen copies. Slower than Desktop Duplication, but works
+/// where that isn't available (some laptops with two GPUs, virtual machines, remote sessions).
+pub struct GdiCapturer {
+    pub monitor: Monitor,
+    screen: windows::Win32::Graphics::Gdi::HDC,
+    mem: windows::Win32::Graphics::Gdi::HDC,
+    bitmap: windows::Win32::Graphics::Gdi::HBITMAP,
+    old: windows::Win32::Graphics::Gdi::HGDIOBJ,
+    bits: *const u8,
+    prev: Vec<u8>,
+}
+
+// The GDI handles are only ever used from the video thread that owns this.
+unsafe impl Send for GdiCapturer {}
+
+impl GdiCapturer {
+    pub fn new(index: usize) -> windows::core::Result<Self> {
+        use windows::Win32::Graphics::Gdi::*;
+        let list = monitors();
+        let monitor = list
+            .get(index.min(list.len().saturating_sub(1)))
+            .cloned()
+            .ok_or_else(|| windows::core::Error::from(DXGI_ERROR_NOT_FOUND))?;
+        unsafe {
+            let screen = GetDC(None);
+            let mem = CreateCompatibleDC(Some(screen));
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: monitor.w,
+                    biHeight: -monitor.h, // top-down rows
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut bits = std::ptr::null_mut();
+            let bitmap = match CreateDIBSection(Some(mem), &info, DIB_RGB_COLORS, &mut bits, None, 0) {
+                Ok(b) => b,
+                Err(e) => {
+                    let _ = DeleteDC(mem);
+                    ReleaseDC(None, screen);
+                    return Err(e);
+                }
+            };
+            let old = SelectObject(mem, bitmap.into());
+            Ok(Self { monitor, screen, mem, bitmap, old, bits: bits as *const u8, prev: Vec::new() })
+        }
+    }
+
+    /// Copies the screen; returns `Ok(false)` if it looks the same as last time.
+    pub fn frame(&mut self, yuv: &mut Yuv, scale: usize) -> Result<bool, CapError> {
+        use windows::Win32::Graphics::Gdi::*;
+        let (w, h) = (self.monitor.w as usize, self.monitor.h as usize);
+        unsafe {
+            BitBlt(
+                self.mem,
+                0,
+                0,
+                w as i32,
+                h as i32,
+                Some(self.screen),
+                self.monitor.x,
+                self.monitor.y,
+                SRCCOPY | CAPTUREBLT,
+            )
+            .map_err(|_| CapError::Lost)?;
+            let data = std::slice::from_raw_parts(self.bits, w * h * 4);
+            if self.prev.as_slice() == data {
+                std::thread::sleep(std::time::Duration::from_millis(16));
+                return Ok(false);
+            }
+            self.prev.clear();
+            self.prev.extend_from_slice(data);
+            yuv.convert(data, w * 4, w, h, scale);
+        }
+        Ok(true)
+    }
+}
+
+impl Drop for GdiCapturer {
+    fn drop(&mut self) {
+        use windows::Win32::Graphics::Gdi::*;
+        unsafe {
+            SelectObject(self.mem, self.old);
+            let _ = DeleteObject(self.bitmap.into());
+            let _ = DeleteDC(self.mem);
+            ReleaseDC(None, self.screen);
+        }
+    }
+}
+
+/// Whichever capture method is working.
+pub enum Source {
+    Fast(Capturer),
+    Backup(GdiCapturer, std::time::Instant, usize),
+}
+
+impl Source {
+    /// Prefers Desktop Duplication; falls back to GDI if it's unavailable.
+    pub fn open(index: usize) -> Result<Self, String> {
+        match Capturer::new(index) {
+            Ok(c) => Ok(Source::Fast(c)),
+            Err(e) => match GdiCapturer::new(index) {
+                Ok(g) => {
+                    static NOTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if !NOTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        eprintln!("Fast screen capture unavailable ({e}); using backup capture.");
+                    }
+                    Ok(Source::Backup(g, std::time::Instant::now(), index))
+                }
+                Err(e2) => Err(format!("{e}; backup: {e2}")),
+            },
+        }
+    }
+
+    pub fn monitor(&self) -> &Monitor {
+        match self {
+            Source::Fast(c) => &c.monitor,
+            Source::Backup(g, _, _) => &g.monitor,
+        }
+    }
+
+    pub fn frame(&mut self, timeout_ms: u32, yuv: &mut Yuv, scale: usize) -> Result<bool, CapError> {
+        match self {
+            Source::Fast(c) => c.frame(timeout_ms, yuv, scale),
+            Source::Backup(g, since, index) => {
+                // Every few seconds, see if fast capture works again (e.g. after the lock screen).
+                if since.elapsed() > std::time::Duration::from_secs(5) {
+                    *since = std::time::Instant::now();
+                    if Capturer::new(*index).is_ok() {
+                        return Err(CapError::Lost);
+                    }
+                }
+                g.frame(yuv, scale)
+            }
+        }
+    }
+}
