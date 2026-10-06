@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Monitor -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,34h48a4,4 0,0 1,4 4v28a4,4 0,0 1,-4 4H30a4,4 0,0 1,-4 -4V38a4,4 0,0 1,4 -4zM31,39v26h46V39z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M46,70h16v5h6v4H40v-4h6z" />
+    <!-- Lightning bolt -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M56,41l-11,13h7l-3,9l11,-13h-7z" />
+</vector>

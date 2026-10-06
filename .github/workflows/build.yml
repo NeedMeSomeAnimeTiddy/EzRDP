@@ -1,0 +1,59 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pc-server:
+    name: PC server (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        working-directory: server
+        run: cargo test --release
+      - name: Build
+        working-directory: server
+        run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EzRDP-PC
+          path: server/target/release/ezrdp-server.exe
+
+  android-app:
+    name: Android app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleRelease
+          cp app/build/outputs/apk/release/app-release.apk EzRDP.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EzRDP-Android
+          path: android/EzRDP.apk
+
+  release:
+    name: Publish download
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [pc-server, android-app]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            EzRDP-PC/ezrdp-server.exe
+            EzRDP-Android/EzRDP.apk
