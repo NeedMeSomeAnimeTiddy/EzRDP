@@ -13,6 +13,8 @@ mod audio;
 #[cfg(windows)]
 mod capture;
 #[cfg(windows)]
+mod firewall;
+#[cfg(windows)]
 mod input;
 #[cfg(windows)]
 mod session;
@@ -162,6 +164,7 @@ fn main() {
     println!("EzRDP is starting...");
     let master = crypto::master_key(&cfg.password, &cfg.salt);
     let internet = cfg.internet.then(|| upnp::open(cfg.port, lan_ip));
+    let fw = firewall::allow(cfg.port);
 
     println!();
     println!("EzRDP is running.");
@@ -178,11 +181,21 @@ fn main() {
         Some(upnp::Status::Failed(why)) => {
             println!("  Couldn't open EzRDP to the internet automatically: {why}.");
             println!("  Fix: turn on UPnP in your router, or forward TCP port {} to this PC.", cfg.port);
+            println!("  (Already forwarded it yourself? Then ignore this. Your Address is your");
+            println!("  internet IP: search \"what is my ip\" on this PC to find it.)");
         }
         None => {}
     }
     if let Some(ip) = lan_ip() {
         println!("  Home IP:   {ip}");
+    }
+    match fw {
+        firewall::Status::Ok => println!("  Firewall:  allowed"),
+        firewall::Status::NeedsAdmin => {
+            println!("  Firewall:  NOT set up. Windows may block your phone (you'd see a timeout).");
+            println!("             Fix: close this, right-click ezrdp-server.exe > Run as administrator, once.");
+        }
+        firewall::Status::Failed(why) => println!("  Firewall:  couldn't check ({why})"),
     }
     println!("  Port:      {}", cfg.port);
     println!("  Password:  {}", cfg.password);

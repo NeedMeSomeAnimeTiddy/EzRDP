@@ -44,8 +44,8 @@ Open the **Actions** tab on GitHub, open the newest green **Build** run, and dow
 ### 2. PC
 
 1. Put `ezrdp-server.exe` in any folder (for example `C:\EzRDP`) and run it.
-2. If Windows asks about the firewall, click **Allow** and tick **both Private and Public**
-   (needed for connecting from outside your home).
+2. The first time, right-click it → **Run as administrator** so it can set up Windows Firewall
+   (the window should say `Firewall: allowed`). After that, run it normally.
    If SmartScreen warns you, click **More info → Run anyway** (the file isn't code-signed).
 3. The window shows your **Address**, **Port** and **Password**. Settings live in `ezrdp.conf` next to the exe.
 

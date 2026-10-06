@@ -43,6 +43,8 @@ class SessionActivity : Activity(), ConnectionListener {
     private var chosenMonitor: Int? = null
     private var running = false
     private var attempt = 0
+    /** True once this screen has been connected; after that we keep retrying for longer. */
+    private var everConnected = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -298,6 +300,7 @@ class SessionActivity : Activity(), ConnectionListener {
                         }
                         conn = c
                         attempt = 0
+                        everConnected = true
                         showStatus("Waiting for picture…")
                         if (soundOn) c.setAudio(true)
                         chosenMonitor?.let { c.selectMonitor(it) }
@@ -322,8 +325,15 @@ class SessionActivity : Activity(), ConnectionListener {
     private fun retry() {
         if (!running) return
         attempt++
-        if (attempt > 20) {
-            fail("Can't reach $host:$port.\n\nIs EzRDP running on the PC, and is the address right?")
+        if (attempt > (if (everConnected) 20 else 3)) {
+            fail(
+                "Can't reach $host:$port.\n\n" +
+                    "• Is EzRDP running on the PC, and does its window say \"Firewall: allowed\"?\n" +
+                    "• Using your internet address? Test with Wi-Fi OFF (mobile data). Many routers " +
+                    "can't reach their own internet address from inside the home.\n" +
+                    "• Port forward: TCP $port must point to the \"Home IP\" shown on the PC.\n" +
+                    "• At home, the Home IP from the PC window always works.",
+            )
             return
         }
         showStatus("Can't reach the PC, retrying…")
