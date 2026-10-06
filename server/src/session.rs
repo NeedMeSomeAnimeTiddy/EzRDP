@@ -5,8 +5,7 @@ use crate::convert::{Yuv, out_size};
 use crate::encoder::{H264, quality, scale_for};
 use crate::input::{Input, cursor, wake_displays};
 use crate::protocol::*;
-use hmac::{Hmac, KeyInit, Mac};
-use sha2::Sha256;
+use crate::login::Login;
 use std::net::{Shutdown, TcpStream};
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32};
@@ -35,32 +34,13 @@ impl Shared {
     }
 }
 
-pub fn authenticate(stream: &mut TcpStream, password: &str) -> std::io::Result<Option<u8>> {
-    let mut nonce = [0u8; 16];
-    getrandom::fill(&mut nonce).map_err(std::io::Error::other)?;
-    let tx = Sender::new(stream.try_clone()?);
-    let mut hello = vec![VERSION];
-    hello.extend_from_slice(&nonce);
-    tx.send(S_HELLO, &hello)?;
-
-    let (kind, body) = read_msg(stream)?;
-    if kind != C_AUTH || body.len() < 33 {
-        return Ok(None);
-    }
-    let mut mac = Hmac::<Sha256>::new_from_slice(password.as_bytes()).unwrap();
-    mac.update(&nonce);
-    let ok = mac.verify_slice(&body[..32]).is_ok();
-    if !ok {
-        std::thread::sleep(Duration::from_secs(1)); // slow down guessing
-    }
-    tx.send(S_AUTH_RESULT, &[ok as u8])?;
-    Ok(ok.then_some(body[32]))
-}
-
 /// Runs a session until the phone disconnects or `kick` is set by a newer connection.
-pub fn run(stream: TcpStream, quality_level: u8, shared: Arc<Shared>) {
-    let tx = Arc::new(Sender::new(stream.try_clone().unwrap()));
-    shared.quality.store(quality_level, Relaxed);
+pub fn run(stream: TcpStream, login: Login, lan_ip: Option<String>, shared: Arc<Shared>) {
+    let tx = Arc::new(Sender::new(stream.try_clone().unwrap(), login.tx));
+    shared.quality.store(login.quality, Relaxed);
+    if let Some(ip) = lan_ip {
+        let _ = tx.send(S_INFO, ip.as_bytes());
+    }
 
     let mons = monitors();
     let primary = mons.iter().position(|m| m.primary).unwrap_or(0);
@@ -86,9 +66,9 @@ pub fn run(stream: TcpStream, quality_level: u8, shared: Arc<Shared>) {
     };
 
     let mut input = Input::new();
-    let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+    let mut reader = Receiver::new(std::io::BufReader::new(stream.try_clone().unwrap()), login.rx);
     while !shared.stopped() {
-        let Ok((kind, body)) = read_msg(&mut reader) else { break };
+        let Ok((kind, body)) = reader.read() else { break };
         handle(kind, &body, &shared, &mut input, &tx);
     }
     input.release_all();

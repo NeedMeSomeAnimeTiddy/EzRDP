@@ -282,26 +282,39 @@ class SessionActivity : Activity(), ConnectionListener {
     private fun connect() {
         showStatus(if (attempt == 0) "Connecting to $host…" else "Reconnecting…")
         Thread {
-            val c = Connection(host, port, password, quality, this)
-            try {
-                c.open()
-                ui.post {
-                    if (!running) {
-                        c.close()
-                        return@post
+            // At home, go straight to the PC's home address (faster); otherwise use the one typed in.
+            val prefs = getSharedPreferences("ezrdp", MODE_PRIVATE)
+            val home = prefs.getString("home_$host", null)
+            val targets = listOfNotNull(home?.takeIf { it != host }?.let { it to 1200 }, host to 6000)
+            var lastError: Exception? = null
+            for ((addr, timeout) in targets) {
+                val c = Connection(addr, port, password, quality, this, timeout)
+                try {
+                    c.open()
+                    ui.post {
+                        if (!running) {
+                            c.close()
+                            return@post
+                        }
+                        conn = c
+                        attempt = 0
+                        showStatus("Waiting for picture…")
+                        if (soundOn) c.setAudio(true)
+                        chosenMonitor?.let { c.selectMonitor(it) }
                     }
-                    conn = c
-                    attempt = 0
-                    showStatus("Waiting for picture…")
-                    if (soundOn) c.setAudio(true)
-                    chosenMonitor?.let { c.selectMonitor(it) }
+                    return@Thread
+                } catch (e: Exception) {
+                    c.close()
+                    lastError = e
+                    if (e is AuthException || e is VersionException) break
                 }
-            } catch (e: AuthException) {
-                c.close()
-                ui.post { fail("Wrong password. Check the password shown on your PC.") }
-            } catch (e: Exception) {
-                c.close()
-                ui.post { retry() }
+            }
+            ui.post {
+                when (lastError) {
+                    is AuthException -> fail("Wrong password. Check the password shown on your PC.")
+                    is VersionException -> fail("The PC and phone apps are different versions. Update both.")
+                    else -> retry()
+                }
             }
         }.start()
     }
@@ -361,6 +374,10 @@ class SessionActivity : Activity(), ConnectionListener {
 
     override fun onAudio(data: ByteArray, offset: Int, length: Int) {
         if (soundOn) audio.write(data, offset, length)
+    }
+
+    override fun onHomeAddress(ip: String) {
+        getSharedPreferences("ezrdp", MODE_PRIVATE).edit().putString("home_$host", ip).apply()
     }
 
     override fun onDisconnected(error: Exception?) {

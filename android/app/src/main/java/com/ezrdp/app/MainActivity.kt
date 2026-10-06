@@ -62,7 +62,7 @@ class MainActivity : Activity() {
         }
 
         col.addView(label("PC address"))
-        hostField = field("e.g. 100.101.102.103 or my-pc", prefs.getString("host", "") ?: "", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI)
+        hostField = field("the Address shown on your PC", prefs.getString("host", "") ?: "", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI)
         col.addView(hostField)
 
         col.addView(label("Port"))
@@ -98,8 +98,8 @@ class MainActivity : Activity() {
         col.addView(connect, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(28) })
 
         col.addView(TextView(this).apply {
-            text = "Tip: install Tailscale on your PC and phone, then use the PC's Tailscale address. " +
-                "It works the same at home and away, and keeps the connection private."
+            text = "Use the Address shown in the EzRDP window on your PC. It works on home Wi-Fi and " +
+                "on mobile data, and everything is encrypted with your password."
             textSize = 13f
             setTextColor(0xFF7C838E.toInt())
             setPadding(dp(2), dp(20), dp(2), 0)

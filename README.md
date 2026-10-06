@@ -44,28 +44,34 @@ Open the **Actions** tab on GitHub, open the newest green **Build** run, and dow
 ### 2. PC
 
 1. Put `ezrdp-server.exe` in any folder (for example `C:\EzRDP`) and run it.
-2. If Windows asks about the firewall, click **Allow** (tick both Private and Public).
+2. If Windows asks about the firewall, click **Allow** and tick **both Private and Public**
+   (needed for connecting from outside your home).
    If SmartScreen warns you, click **More info → Run anyway** (the file isn't code-signed).
-3. The window shows your **password**. It's saved in `ezrdp.conf` next to the exe, so you can change it there.
+3. The window shows your **Address**, **Port** and **Password**. Settings live in `ezrdp.conf` next to the exe.
 
 To start it with Windows: press `Win+R`, type `shell:startup`, and put a shortcut to `ezrdp-server.exe` in that folder.
 
-### 3. Connecting from anywhere (recommended: Tailscale)
-
-1. Install [Tailscale](https://tailscale.com/download) on the PC and the phone, and log in with the same account on both.
-2. In the Tailscale app, find your PC's address (starts with `100.`).
-3. Use that address in EzRDP. It works at home and away, and the connection is encrypted.
-
-At home only? You can use the PC's home IP shown in the EzRDP window instead.
-
-> Don't open the port on your router. Use Tailscale. EzRDP checks the password, but the
-> picture itself isn't encrypted unless it goes through Tailscale.
-
-### 4. Phone
+### 3. Phone
 
 1. Install `EzRDP.apk` (allow "install unknown apps" for your browser/files app when asked).
-2. Enter the PC address, port `7270`, and the password. Tap **Connect**.
+2. Enter the **Address** and **Password** from the PC window. Tap **Connect**.
 3. Tap the **☰** button at the top for the toolbar.
+
+That's it. It works on home Wi-Fi and on mobile data. At home the app automatically switches
+to the faster direct connection.
+
+### How "connect from anywhere" works
+
+- On start, EzRDP asks your router to open its port (UPnP). Most home routers allow this by default.
+- Everything is encrypted (AES-GCM) with a key made from your password. The password itself is never sent.
+- If the PC window says it **couldn't open to the internet**:
+  - "no UPnP router found" / "router refused": turn on UPnP in your router settings, or
+    forward **TCP port 7270** to this PC by hand.
+  - "your internet provider shares one address": your provider uses CGNAT, so nothing from the
+    internet can reach your PC directly. Ask them for a public IP, or use Tailscale instead.
+- Your home internet address can change now and then (most providers). If the phone stops
+  connecting from outside, check the Address in the PC window and update it in the app.
+- Don't want it reachable from outside? Set `internet=off` in `ezrdp.conf`.
 
 ## Limits
 
@@ -78,6 +84,7 @@ At home only? You can use the PC's home IP shown in the EzRDP window instead.
 - Video: H.264 (OpenH264, screen-content mode) → hardware decoder on the phone, with low-latency mode.
 - Lag control: the PC only sends a new frame once the phone has confirmed the earlier ones, so delay can't pile up on slow connections.
 - Input: Windows `SendInput`. Sound: WASAPI loopback → raw 16-bit PCM.
+- Security: PBKDF2 password key, HMAC challenge login, AES-128-GCM on every message.
 
 ## Building yourself
 

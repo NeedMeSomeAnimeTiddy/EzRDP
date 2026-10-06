@@ -8,7 +8,12 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.util.concurrent.LinkedBlockingQueue
+import java.security.SecureRandom
+import javax.crypto.Cipher
 import javax.crypto.Mac
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 
 /** Message types. Must match server/src/protocol.rs. */
@@ -22,6 +27,7 @@ object Msg {
     const val S_AUDIO_CONFIG = 0x07
     const val S_AUDIO = 0x08
     const val S_PING = 0x09
+    const val S_INFO = 0x0A
 
     const val C_AUTH = 0x81
     const val C_MOUSE_ABS = 0x82
@@ -41,6 +47,52 @@ object Msg {
 data class MonitorInfo(val index: Int, val primary: Boolean, val width: Int, val height: Int, val name: String)
 
 class AuthException : IOException("Wrong password")
+class VersionException : IOException("Version mismatch")
+
+/** AES-GCM for one direction; the message counter is the nonce (must match server/src/crypto.rs). */
+private class Seal(key: ByteArray) {
+    private val key = SecretKeySpec(key, 0, 16, "AES")
+    private var counter = 0L
+    private val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+
+    private fun nonce(): GCMParameterSpec {
+        val n = ByteBuffer.allocate(12).putInt(0).putLong(counter++).array()
+        return GCMParameterSpec(128, n)
+    }
+
+    fun seal(plain: ByteArray): ByteArray {
+        cipher.init(Cipher.ENCRYPT_MODE, key, nonce())
+        return cipher.doFinal(plain)
+    }
+
+    fun open(sealed: ByteArray): ByteArray {
+        cipher.init(Cipher.DECRYPT_MODE, key, nonce())
+        return cipher.doFinal(sealed)
+    }
+}
+
+private object Keys {
+    private val cache = HashMap<String, ByteArray>()
+
+    /** PBKDF2 is slow on purpose, so remember the result for this password + PC. */
+    @Synchronized
+    fun master(password: String, salt: ByteArray, rounds: Int): ByteArray {
+        val id = password + "|" + salt.joinToString("") { "%02x".format(it) } + "|" + rounds
+        return cache.getOrPut(id) {
+            val spec = PBEKeySpec(password.toCharArray(), salt, rounds, 256)
+            SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
+        }
+    }
+
+    fun derive(master: ByteArray, label: String, ns: ByteArray, nc: ByteArray): ByteArray {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(master, "HmacSHA256"))
+        mac.update(label.toByteArray(Charsets.US_ASCII))
+        mac.update(ns)
+        mac.update(nc)
+        return mac.doFinal()
+    }
+}
 
 interface ConnectionListener {
     fun onMonitors(list: List<MonitorInfo>)
@@ -49,6 +101,7 @@ interface ConnectionListener {
     fun onCursor(x: Float, y: Float, visible: Boolean)
     fun onAudioConfig(sampleRate: Int, channels: Int)
     fun onAudio(data: ByteArray, offset: Int, length: Int)
+    fun onHomeAddress(ip: String)
     fun onDisconnected(error: Exception?)
 }
 
@@ -62,7 +115,11 @@ class Connection(
     private val password: String,
     private val quality: Int,
     private val listener: ConnectionListener,
+    private val connectTimeout: Int = 6000,
 ) {
+    private lateinit var tx: Seal
+    private lateinit var rx: Seal
+
     private val socket = Socket()
     private val queue = LinkedBlockingQueue<ByteArray>()
     @Volatile private var closed = false
@@ -72,22 +129,29 @@ class Connection(
     fun open() {
         socket.tcpNoDelay = true
         socket.receiveBufferSize = 1 shl 20
-        socket.connect(InetSocketAddress(host, port), 6000)
+        socket.connect(InetSocketAddress(host, port), connectTimeout)
         socket.soTimeout = 10000 // the PC pings every 2s, so silence means the link is dead
         val input = DataInputStream(BufferedInputStream(socket.getInputStream(), 1 shl 16))
-        val output = DataOutputStream(socket.getOutputStream())
+        val output = DataOutputStream(java.io.BufferedOutputStream(socket.getOutputStream(), 1 shl 16))
 
-        // Login: prove we know the password without sending it.
-        val hello = readMsg(input)
+        // Login: prove we know the password without sending it, and agree on encryption keys.
+        val hello = readPlain(input)
         if (hello.first != Msg.S_HELLO) throw IOException("Not an EzRDP server")
-        val nonce = hello.second.copyOfRange(1, 17)
-        val mac = Mac.getInstance("HmacSHA256")
-        mac.init(SecretKeySpec(password.toByteArray(Charsets.UTF_8), "HmacSHA256"))
-        val auth = mac.doFinal(nonce) + byteArrayOf(quality.toByte())
-        output.write(frame(Msg.C_AUTH, auth))
+        val h = ByteBuffer.wrap(hello.second)
+        if (h.get().toInt() != 2) throw VersionException()
+        val salt = ByteArray(16).also { h.get(it) }
+        val rounds = h.int
+        val ns = ByteArray(16).also { h.get(it) }
+        val nc = ByteArray(16).also { SecureRandom().nextBytes(it) }
+        val master = Keys.master(password, salt, rounds)
+        val proof = Keys.derive(master, "auth", ns, nc)
+        val auth = nc + proof + byteArrayOf(quality.toByte())
+        output.write(ByteBuffer.allocate(5 + auth.size).put(Msg.C_AUTH.toByte()).putInt(auth.size).put(auth).array())
         output.flush()
-        val result = readMsg(input)
+        val result = readPlain(input)
         if (result.first != Msg.S_AUTH_RESULT || result.second[0].toInt() != 1) throw AuthException()
+        tx = Seal(Keys.derive(master, "c2s", ns, nc))
+        rx = Seal(Keys.derive(master, "s2c", ns, nc))
 
         Thread({ writeLoop(output) }, "ezrdp-writer").start()
         Thread({ readLoop(input) }, "ezrdp-reader").start()
@@ -112,21 +176,29 @@ class Connection(
         try { socket.close() } catch (_: IOException) {}
     }
 
-    private fun readMsg(input: DataInputStream): Pair<Int, ByteArray> {
+    private fun readPlain(input: DataInputStream): Pair<Int, ByteArray> {
         val type = input.readUnsignedByte()
         val len = input.readInt()
-        if (len < 0 || len > 64 shl 20) throw IOException("Bad message")
+        if (len < 0 || len > 4096) throw IOException("Not an EzRDP server")
         val body = ByteArray(len)
         input.readFully(body)
         return type to body
+    }
+
+    /** Reads one encrypted message; returns the plaintext (type byte first). */
+    private fun readSealed(input: DataInputStream): ByteArray {
+        val len = input.readInt()
+        if (len < 17 || len > 64 shl 20) throw IOException("Bad message")
+        val body = ByteArray(len)
+        input.readFully(body)
+        return rx.open(body)
     }
 
     private fun readLoop(input: DataInputStream) {
         var error: Exception? = null
         try {
             while (!closed) {
-                val (type, body) = readMsg(input)
-                handle(type, body)
+                handle(readSealed(input))
             }
         } catch (e: Exception) {
             error = e
@@ -135,8 +207,9 @@ class Connection(
         listener.onDisconnected(if (userClosed) null else (error ?: IOException("Connection closed")))
     }
 
-    private fun handle(type: Int, body: ByteArray) {
-        val b = ByteBuffer.wrap(body)
+    private fun handle(msg: ByteArray) {
+        val type = msg[0].toInt() and 0xff
+        val b = ByteBuffer.wrap(msg, 1, msg.size - 1)
         when (type) {
             Msg.S_MONITORS -> {
                 val count = b.get().toInt() and 0xff
@@ -147,7 +220,7 @@ class Connection(
                     val w = b.short.toInt() and 0xffff
                     val h = b.short.toInt() and 0xffff
                     val nameLen = b.short.toInt() and 0xffff
-                    val name = String(body, b.position(), nameLen, Charsets.UTF_8)
+                    val name = String(msg, b.position(), nameLen, Charsets.UTF_8)
                     b.position(b.position() + nameLen)
                     list.add(MonitorInfo(index, primary, w, h, name))
                 }
@@ -164,7 +237,7 @@ class Connection(
                 val key = b.get().toInt() != 0
                 // Tell the PC this frame arrived so it can send the next one.
                 send(Msg.C_FRAME_ACK, ByteBuffer.allocate(4).putInt(id).array())
-                listener.onVideoFrame(body, 5, body.size - 5, key)
+                listener.onVideoFrame(msg, 6, msg.size - 6, key)
             }
             Msg.S_CURSOR -> {
                 val x = b.float
@@ -172,7 +245,8 @@ class Connection(
                 listener.onCursor(x, y, b.get().toInt() != 0)
             }
             Msg.S_AUDIO_CONFIG -> listener.onAudioConfig(b.int, b.get().toInt() and 0xff)
-            Msg.S_AUDIO -> listener.onAudio(body, 0, body.size)
+            Msg.S_AUDIO -> listener.onAudio(msg, 1, msg.size - 1)
+            Msg.S_INFO -> listener.onHomeAddress(String(msg, 1, msg.size - 1, Charsets.UTF_8))
         }
     }
 
@@ -181,12 +255,12 @@ class Connection(
             while (!closed) {
                 val msg = queue.take()
                 if (msg.isEmpty()) break
-                output.write(msg)
+                writeSealed(output, msg)
                 // Batch whatever else is already waiting into one flush.
                 while (true) {
                     val more = queue.poll() ?: break
                     if (more.isEmpty()) return
-                    output.write(more)
+                    writeSealed(output, more)
                 }
                 output.flush()
             }
@@ -195,14 +269,14 @@ class Connection(
         }
     }
 
-    private fun frame(type: Int, payload: ByteArray): ByteArray {
-        val out = ByteBuffer.allocate(5 + payload.size)
-        out.put(type.toByte()).putInt(payload.size).put(payload)
-        return out.array()
+    private fun writeSealed(output: DataOutputStream, plain: ByteArray) {
+        val sealed = tx.seal(plain)
+        output.writeInt(sealed.size)
+        output.write(sealed)
     }
 
     fun send(type: Int, payload: ByteArray = ByteArray(0)) {
-        if (!closed) queue.offer(frame(type, payload))
+        if (!closed) queue.offer(byteArrayOf(type.toByte()) + payload)
     }
 
     // --- Convenience senders ---
