@@ -31,7 +31,6 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - uses: gradle/actions/setup-gradle@v4
       - name: Build APK
         working-directory: android
         run: |
@@ -52,8 +51,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            EzRDP-PC/ezrdp-server.exe
-            EzRDP-Android/EzRDP.apk
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "${{ github.ref_name }}" --repo "${{ github.repository }}" --title "EzRDP ${{ github.ref_name }}"
+          EzRDP-PC/ezrdp-server.exe EzRDP-Android/EzRDP.apk
