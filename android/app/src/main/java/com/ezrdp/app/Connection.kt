@@ -11,9 +11,7 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.Mac
-import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 
 /** Message types. Must match server/src/protocol.rs. */
@@ -28,6 +26,8 @@ object Msg {
     const val S_AUDIO = 0x08
     const val S_PING = 0x09
     const val S_INFO = 0x0A
+    const val S_PAIR_KEY = 0x0B
+    const val S_PAIR_RESULT = 0x0C
 
     const val C_AUTH = 0x81
     const val C_MOUSE_ABS = 0x82
@@ -42,12 +42,26 @@ object Msg {
     const val C_KEYFRAME = 0x8B
     const val C_SET_QUALITY = 0x8C
     const val C_PING = 0x8D
+    const val C_PAIR_START = 0x8E
+    const val C_PAIR_KEY = 0x8F
+
+    const val RESULT_DENIED = 0
+    const val RESULT_OK = 1
+    const val RESULT_PAUSED = 2
+    const val RESULT_NOT_LOCAL = 3
+    const val RESULT_BUSY = 4
+
+    const val VERSION = 3
 }
 
 data class MonitorInfo(val index: Int, val primary: Boolean, val width: Int, val height: Int, val name: String)
 
-class AuthException : IOException("Wrong password")
+/** The PC no longer trusts this phone (it was removed on the PC). */
+class NotTrustedException : IOException("Not trusted")
 class VersionException : IOException("Version mismatch")
+class PausedException : IOException("Paused")
+/** Something answered at this address, but it's a different PC. */
+class WrongPcException : IOException("Different PC")
 
 /** AES-GCM for one direction; the message counter is the nonce (must match server/src/crypto.rs). */
 private class Seal(key: ByteArray) {
@@ -71,27 +85,44 @@ private class Seal(key: ByteArray) {
     }
 }
 
-private object Keys {
-    private val cache = HashMap<String, ByteArray>()
-
-    /** PBKDF2 is slow on purpose, so remember the result for this password + PC. */
-    @Synchronized
-    fun master(password: String, salt: ByteArray, rounds: Int): ByteArray {
-        val id = password + "|" + salt.joinToString("") { "%02x".format(it) } + "|" + rounds
-        return cache.getOrPut(id) {
-            val spec = PBEKeySpec(password.toCharArray(), salt, rounds, 256)
-            SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
-        }
-    }
-
-    fun derive(master: ByteArray, label: String, ns: ByteArray, nc: ByteArray): ByteArray {
+internal object Keys {
+    fun derive(key: ByteArray, label: String, ns: ByteArray, nc: ByteArray): ByteArray {
         val mac = Mac.getInstance("HmacSHA256")
-        mac.init(SecretKeySpec(master, "HmacSHA256"))
+        mac.init(SecretKeySpec(key, "HmacSHA256"))
         mac.update(label.toByteArray(Charsets.US_ASCII))
         mac.update(ns)
         mac.update(nc)
         return mac.doFinal()
     }
+}
+
+/** What the PC says first: who it is. */
+internal class Hello(val pcId: ByteArray, val nonce: ByteArray, val paused: Boolean, val name: String)
+
+internal fun readPlain(input: DataInputStream): Pair<Int, ByteArray> {
+    val type = input.readUnsignedByte()
+    val len = input.readInt()
+    if (len < 0 || len > 4096) throw IOException("Not an EzRDP PC")
+    val body = ByteArray(len)
+    input.readFully(body)
+    return type to body
+}
+
+internal fun writePlain(output: java.io.OutputStream, type: Int, payload: ByteArray) {
+    output.write(ByteBuffer.allocate(5 + payload.size).put(type.toByte()).putInt(payload.size).put(payload).array())
+    output.flush()
+}
+
+internal fun readHello(input: DataInputStream): Hello {
+    val (type, body) = readPlain(input)
+    if (type != Msg.S_HELLO || body.isEmpty()) throw IOException("Not an EzRDP PC")
+    if (body[0].toInt() != Msg.VERSION) throw VersionException()
+    val b = ByteBuffer.wrap(body, 1, body.size - 1)
+    val id = ByteArray(16).also { b.get(it) }
+    val nonce = ByteArray(16).also { b.get(it) }
+    val paused = b.get().toInt() != 0
+    val name = String(body, b.position(), b.remaining(), Charsets.UTF_8)
+    return Hello(id, nonce, paused, name)
 }
 
 interface ConnectionListener {
@@ -101,7 +132,8 @@ interface ConnectionListener {
     fun onCursor(x: Float, y: Float, visible: Boolean)
     fun onAudioConfig(sampleRate: Int, channels: Int)
     fun onAudio(data: ByteArray, offset: Int, length: Int)
-    fun onHomeAddress(ip: String)
+    /** The PC's current home address, internet address and port, to remember for next time. */
+    fun onAddresses(home: String, internet: String, port: Int)
     fun onDisconnected(error: Exception?)
 }
 
@@ -112,7 +144,10 @@ interface ConnectionListener {
 class Connection(
     private val host: String,
     private val port: Int,
-    private val password: String,
+    /** The PC we expect at this address (null = any). */
+    private val pcId: ByteArray?,
+    private val deviceId: ByteArray,
+    private val deviceKey: ByteArray,
     private val quality: Int,
     private val listener: ConnectionListener,
     private val connectTimeout: Int = 6000,
@@ -134,22 +169,22 @@ class Connection(
         val input = DataInputStream(BufferedInputStream(socket.getInputStream(), 1 shl 16))
         val output = DataOutputStream(java.io.BufferedOutputStream(socket.getOutputStream(), 1 shl 16))
 
-        // Login: prove we know the password without sending it, and agree on encryption keys.
-        val hello = readPlain(input)
-        if (hello.first != Msg.S_HELLO) throw IOException("Not an EzRDP server")
-        val h = ByteBuffer.wrap(hello.second)
-        if (h.get().toInt() != 2) throw VersionException()
-        val salt = ByteArray(16).also { h.get(it) }
-        val rounds = h.int
-        val ns = ByteArray(16).also { h.get(it) }
+        // Login: prove we're a trusted phone, and agree on encryption keys.
+        val hello = readHello(input)
+        if (pcId != null && !hello.pcId.contentEquals(pcId)) throw WrongPcException()
+        if (hello.paused) throw PausedException()
+        val ns = hello.nonce
         val nc = ByteArray(16).also { SecureRandom().nextBytes(it) }
-        val master = Keys.master(password, salt, rounds)
-        val proof = Keys.derive(master, "auth", ns, nc)
-        val auth = nc + proof + byteArrayOf(quality.toByte())
-        output.write(ByteBuffer.allocate(5 + auth.size).put(Msg.C_AUTH.toByte()).putInt(auth.size).put(auth).array())
-        output.flush()
+        val proof = Keys.derive(deviceKey, "auth", ns, nc)
+        writePlain(output, Msg.C_AUTH, deviceId + nc + proof + byteArrayOf(quality.toByte()))
         val result = readPlain(input)
-        if (result.first != Msg.S_AUTH_RESULT || result.second[0].toInt() != 1) throw AuthException()
+        if (result.first != Msg.S_AUTH_RESULT) throw IOException("Not an EzRDP PC")
+        when (result.second[0].toInt()) {
+            Msg.RESULT_OK -> {}
+            Msg.RESULT_PAUSED -> throw PausedException()
+            else -> throw NotTrustedException()
+        }
+        val master = deviceKey
         tx = Seal(Keys.derive(master, "c2s", ns, nc))
         rx = Seal(Keys.derive(master, "s2c", ns, nc))
 
@@ -174,15 +209,6 @@ class Connection(
         closed = true
         queue.offer(ByteArray(0))
         try { socket.close() } catch (_: IOException) {}
-    }
-
-    private fun readPlain(input: DataInputStream): Pair<Int, ByteArray> {
-        val type = input.readUnsignedByte()
-        val len = input.readInt()
-        if (len < 0 || len > 4096) throw IOException("Not an EzRDP server")
-        val body = ByteArray(len)
-        input.readFully(body)
-        return type to body
     }
 
     /** Reads one encrypted message; returns the plaintext (type byte first). */
@@ -246,7 +272,15 @@ class Connection(
             }
             Msg.S_AUDIO_CONFIG -> listener.onAudioConfig(b.int, b.get().toInt() and 0xff)
             Msg.S_AUDIO -> listener.onAudio(msg, 1, msg.size - 1)
-            Msg.S_INFO -> listener.onHomeAddress(String(msg, 1, msg.size - 1, Charsets.UTF_8))
+            Msg.S_INFO -> {
+                val homeLen = b.get().toInt() and 0xff
+                val home = String(msg, b.position(), homeLen, Charsets.UTF_8)
+                b.position(b.position() + homeLen)
+                val netLen = b.get().toInt() and 0xff
+                val net = String(msg, b.position(), netLen, Charsets.UTF_8)
+                b.position(b.position() + netLen)
+                listener.onAddresses(home, net, b.short.toInt() and 0xffff)
+            }
         }
     }
 

@@ -1,7 +1,8 @@
-//! Password-based login and encryption.
+//! Login and encryption.
 //!
-//! master = PBKDF2-SHA256(password, salt, 100k rounds). Both sides pick a random nonce;
-//! the phone proves it knows the password with HMAC(master, "auth" | ns | nc), and each
+//! Each trusted phone shares a 32-byte device key with the PC (made during pairing).
+//! Both sides pick a random nonce; the phone proves it has the key with
+//! HMAC(key, "auth" | ns | nc), and each
 //! direction gets its own AES-128-GCM key derived the same way. A message counter is the
 //! GCM nonce, so replayed, reordered or altered data is rejected.
 
@@ -9,14 +10,6 @@ use aes_gcm::Aes128Gcm;
 use aes_gcm::aead::{AeadInOut, KeyInit};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-
-pub const ROUNDS: u32 = 100_000;
-
-pub fn master_key(password: &str, salt: &[u8]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    pbkdf2::pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, ROUNDS, &mut out);
-    out
-}
 
 pub fn derive(master: &[u8; 32], label: &[u8], ns: &[u8], nc: &[u8]) -> [u8; 32] {
     let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(master).unwrap();
@@ -87,7 +80,7 @@ mod tests {
 
     #[test]
     fn roundtrip_and_tamper() {
-        let m = master_key("hunter2", b"0123456789abcdef");
+        let m = [3u8; 32];
         let k = derive(&m, b"s2c", b"a", b"b");
         let (mut tx, mut rx) = (Seal::new(&k), Seal::new(&k));
         let mut buf = b"hello screen".to_vec();
@@ -102,12 +95,10 @@ mod tests {
         assert!(!rx.open(&mut buf));
     }
 
-    /// Fixed values the Android app's test vectors are checked against.
     #[test]
-    fn known_vector() {
-        let m = master_key("pw", b"salt");
-        let hex: String = m.iter().map(|b| format!("{b:02x}")).collect();
-        println!("master={hex}");
+    fn proof() {
+        let m = [1u8; 32];
         assert!(verify(&m, b"ns", b"nc", &derive(&m, b"auth", b"ns", b"nc")));
+        assert!(!verify(&[2u8; 32], b"ns", b"nc", &derive(&m, b"auth", b"ns", b"nc")));
     }
 }

@@ -1,15 +1,25 @@
+//! EzRDP: lives in the tray on the PC; the EzRDP phone app connects to it.
 #![cfg_attr(not(windows), allow(dead_code))]
-//! EzRDP server: run this on the PC, connect with the EzRDP phone app.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod convert;
 mod crypto;
+mod discovery;
 mod encoder;
+mod log;
 mod login;
+mod pairing;
 mod protocol;
+mod server;
+mod state;
+mod stun;
+mod trust;
 mod upnp;
 
 #[cfg(windows)]
 mod audio;
+#[cfg(windows)]
+mod autostart;
 #[cfg(windows)]
 mod capture;
 #[cfg(windows)]
@@ -18,226 +28,261 @@ mod firewall;
 mod input;
 #[cfg(windows)]
 mod session;
+#[cfg(windows)]
+mod tray;
 
+use state::App;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 struct Config {
     port: u16,
-    password: String,
     /// Open the port on the router automatically so the phone can connect from anywhere.
     internet: bool,
-    salt: [u8; 16],
+    pc_id: [u8; 16],
+    name: String,
+    /// Set after the first run, so "Start with Windows" is only switched on once.
+    first_run_done: bool,
 }
 
-fn config_path() -> PathBuf {
-    let exe = std::env::current_exe().unwrap_or_default();
-    exe.with_file_name("ezrdp.conf")
-}
-
-fn random_password() -> String {
-    const CHARS: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789";
-    let mut bytes = [0u8; 10];
-    getrandom::fill(&mut bytes).expect("no random source");
-    bytes.iter().map(|b| CHARS[*b as usize % CHARS.len()] as char).collect()
-}
-
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
-fn parse_salt(s: &str) -> Option<[u8; 16]> {
-    let s = s.trim();
-    if s.len() != 32 {
-        return None;
-    }
-    let mut out = [0u8; 16];
-    for (i, o) in out.iter_mut().enumerate() {
-        *o = u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()?;
-    }
-    Some(out)
+fn data_path(file: &str) -> PathBuf {
+    std::env::current_exe().unwrap_or_default().with_file_name(file)
 }
 
 fn load_config() -> Config {
-    let path = config_path();
+    let path = data_path("ezrdp.conf");
     let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut cfg = Config { port: protocol::DEFAULT_PORT, password: String::new(), internet: true, salt: [0; 16] };
-    let mut salt = None;
+    let mut cfg = Config {
+        port: protocol::DEFAULT_PORT,
+        internet: true,
+        pc_id: [0; 16],
+        name: String::new(),
+        first_run_done: false,
+    };
+    let mut id = None;
     for line in text.lines() {
         if let Some((k, v)) = line.split_once('=') {
+            let v = v.trim();
             match k.trim() {
-                "port" => cfg.port = v.trim().parse().unwrap_or(cfg.port),
-                "password" => cfg.password = v.trim().to_string(),
-                "internet" => cfg.internet = !matches!(v.trim(), "off" | "no" | "false" | "0"),
-                "salt" => salt = parse_salt(v),
+                "port" => cfg.port = v.parse().unwrap_or(cfg.port),
+                "internet" => cfg.internet = !matches!(v, "off" | "no" | "false" | "0"),
+                "id" => id = trust::unhex::<16>(v),
+                "name" => cfg.name = v.to_string(),
+                "first_run_done" => cfg.first_run_done = v == "yes",
                 _ => {}
             }
         }
     }
-    let incomplete = cfg.password.is_empty() || salt.is_none();
-    if cfg.password.is_empty() {
-        cfg.password = random_password();
-    }
-    cfg.salt = salt.unwrap_or_else(|| {
-        let mut s = [0u8; 16];
-        getrandom::fill(&mut s).expect("no random source");
-        s
+    let incomplete = id.is_none() || !cfg.first_run_done;
+    cfg.pc_id = id.unwrap_or_else(|| {
+        let mut b = [0u8; 16];
+        getrandom::fill(&mut b).expect("no random source");
+        b
     });
     if incomplete {
-        let body = format!(
-            "# EzRDP settings. Restart EzRDP after editing.\n\
-             port={}\n\
-             password={}\n\
-             # internet=on lets your phone connect from anywhere (opens the port on your router automatically).\n\
-             internet={}\n\
-             # Don't change this one.\n\
-             salt={}\n",
-            cfg.port,
-            cfg.password,
-            if cfg.internet { "on" } else { "off" },
-            hex(&cfg.salt)
-        );
-        if let Err(e) = std::fs::write(&path, body) {
-            eprintln!("Could not save {}: {e}", path.display());
-        }
+        save_config(&cfg);
+    }
+    if cfg.name.is_empty() {
+        cfg.name = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "My PC".into());
     }
     cfg
 }
 
-fn lan_ip() -> Option<std::net::IpAddr> {
-    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    s.connect("8.8.8.8:80").ok()?;
-    Some(s.local_addr().ok()?.ip())
+fn save_config(cfg: &Config) {
+    let body = format!(
+        "# EzRDP settings. Restart EzRDP after editing.\n\
+         port={}\n\
+         # internet=on lets trusted phones connect from anywhere (opens the port on your router).\n\
+         internet={}\n\
+         # Name shown on the phone (blank = this PC's name).\n\
+         name={}\n\
+         # Don't change these.\n\
+         id={}\n\
+         first_run_done=yes\n",
+        cfg.port,
+        if cfg.internet { "on" } else { "off" },
+        cfg.name,
+        trust::hex(&cfg.pc_id)
+    );
+    let _ = std::fs::write(data_path("ezrdp.conf"), body);
 }
 
-/// Off Windows there's no screen to share; `ezrdp-server test-server <password>` runs a
-/// protocol test server used to check the phone app's login and encryption.
+fn new_app(cfg: &Config) -> Arc<App> {
+    Arc::new(App {
+        pc_id: cfg.pc_id,
+        pc_name: cfg.name.clone(),
+        port: cfg.port,
+        paused: AtomicBool::new(false),
+        trusted: Mutex::new(trust::Trusted::load(data_path("trusted.txt"))),
+        connected: Mutex::new(None),
+        public_ip: Mutex::new(None),
+        pairing: AtomicBool::new(false),
+        on_change: Mutex::new(None),
+    })
+}
+
+/// Finds this PC's internet address and opens the router port, in the background.
+fn reach_internet(app: Arc<App>, internet: bool) -> String {
+    let upnp = internet.then(|| upnp::open(app.port, server::lan_ip));
+    let stun = stun::public_ip();
+    let upnp_ip = match &upnp {
+        Some(upnp::Status::Open(ip)) => Some(*ip),
+        _ => None,
+    };
+    *app.public_ip.lock().unwrap() = stun.or(upnp_ip);
+    match upnp {
+        None => "Internet access: off (internet=off in ezrdp.conf)".into(),
+        Some(upnp::Status::Open(_)) => "Router: port opened automatically".into(),
+        Some(upnp::Status::SharedAddress(ip)) => format!(
+            "Router: your internet provider shares one address between homes (CGNAT, router sees {ip}), \
+             so phones can only connect on home Wi-Fi"
+        ),
+        Some(upnp::Status::Failed(why)) => {
+            format!("Router: couldn't open the port automatically ({why}). Fine if you forwarded port {} yourself.", app.port)
+        }
+    }
+}
+
+/// Off Windows there's no screen to share; `ezrdp-server test-server` runs the network side
+/// (pairing auto-approves and prints the code) so the phone app's protocol can be tested.
 #[cfg(not(windows))]
 fn main() {
-    let _ = load_config;
-    let _ = upnp::open;
-    let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(String::as_str) != Some("test-server") {
-        eprintln!("The EzRDP server only runs on Windows.");
+    if std::env::args().nth(1).as_deref() != Some("test-server") {
+        eprintln!("EzRDP only runs on Windows.");
         return;
     }
-    let password = args.get(2).cloned().unwrap_or_default();
-    let salt = [9u8; 16];
-    let master = crypto::master_key(&password, &salt);
-    let listener = std::net::TcpListener::bind("127.0.0.1:7270").unwrap();
-    println!("listening");
-    let (mut stream, _) = listener.accept().unwrap();
-    let Some(l) = login::authenticate(&mut stream, &master, &salt).unwrap() else {
-        println!("auth failed");
-        return;
-    };
-    println!("auth ok quality={}", l.quality);
-    let tx = protocol::Sender::new(stream.try_clone().unwrap(), l.tx);
-    tx.send(protocol::S_INFO, lan_ip().map(|i| i.to_string()).unwrap_or_default().as_bytes()).unwrap();
-    tx.send_parts(protocol::S_VIDEO_FRAME, &[0, 0, 0, 1, 1], &[0, 0, 0, 1, 0x67, 0xAA]).unwrap();
-    let mut rx = protocol::Receiver::new(stream, l.rx);
-    while let Ok((kind, body)) = rx.read() {
-        println!("got {kind:#04x} {body:?}");
+    let cfg = load_config();
+    let app = new_app(&cfg);
+    std::thread::spawn({
+        let app = app.clone();
+        move || discovery::run(app)
+    });
+    fn approve(name: &str, code: u32) -> bool {
+        println!("pair request from {name}, code {}", pairing::format_code(code));
+        true
     }
+    fn session(stream: std::net::TcpStream, l: login::Login, info: Vec<u8>, _app: Arc<App>) {
+        println!("session for {} quality={}", l.device_name, l.quality);
+        let tx = protocol::Sender::new(stream.try_clone().unwrap(), l.tx);
+        tx.send(protocol::S_INFO, &info).unwrap();
+        tx.send_parts(protocol::S_VIDEO_FRAME, &[0, 0, 0, 1, 1], &[0, 0, 0, 1, 0x67, 0xAA]).unwrap();
+        let mut rx = protocol::Receiver::new(stream, l.rx);
+        while let Ok((kind, body)) = rx.read() {
+            println!("got {kind:#04x} {body:?}");
+        }
+    }
+    println!("test server listening on {}", cfg.port);
+    server::listen(app, approve, session).unwrap();
 }
 
 #[cfg(windows)]
 fn main() {
-    use std::net::{TcpListener, TcpStream};
-    use std::sync::{Arc, Mutex};
     use std::time::Duration;
+    use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+    use windows::Win32::System::Threading::CreateMutexW;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    use windows::core::{HSTRING, w};
+
+    // Started elevated just to set up the firewall.
+    if std::env::args().any(|a| a == "--setup-firewall") {
+        let _ = firewall::allow();
+        return;
+    }
 
     unsafe {
+        let _ = CreateMutexW(None, true, w!("Local\\EzRDP"));
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            MessageBoxW(None, w!("EzRDP is already running. Look for its icon near the clock."), w!("EzRDP"), MB_OK);
+            return;
+        }
         use windows::Win32::UI::HiDpi::*;
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
+    log::init();
 
     let cfg = load_config();
-    let listener = match TcpListener::bind(("0.0.0.0", cfg.port)) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("Can't listen on port {}: {e}", cfg.port);
-            std::thread::sleep(Duration::from_secs(10));
-            return;
-        }
-    };
-
-    println!("EzRDP is starting...");
-    let master = crypto::master_key(&cfg.password, &cfg.salt);
-    let internet = cfg.internet.then(|| upnp::open(cfg.port, lan_ip));
-    let fw = firewall::allow(cfg.port);
-
-    println!();
-    println!("EzRDP is running.");
-    println!();
-    match &internet {
-        Some(upnp::Status::Open(ip)) => {
-            println!("  Address:   {ip}   (works from anywhere)");
-        }
-        Some(upnp::Status::SharedAddress(ip)) => {
-            println!("  Couldn't open EzRDP to the internet: your internet provider shares one");
-            println!("  address between homes ({ip}), so outside connections can't get in.");
-            println!("  It will still work on your home Wi-Fi.");
-        }
-        Some(upnp::Status::Failed(why)) => {
-            println!("  Couldn't open EzRDP to the internet automatically: {why}.");
-            println!("  Fix: turn on UPnP in your router, or forward TCP port {} to this PC.", cfg.port);
-            println!("  (Already forwarded it yourself? Then ignore this. Your Address is your");
-            println!("  internet IP: search \"what is my ip\" on this PC to find it.)");
-        }
-        None => {}
+    if !cfg.first_run_done {
+        autostart::set(true);
     }
-    if let Some(ip) = lan_ip() {
-        println!("  Home IP:   {ip}");
-    }
-    match fw {
-        firewall::Status::Ok => println!("  Firewall:  allowed"),
-        firewall::Status::NeedsAdmin => {
-            println!("  Firewall:  NOT set up. Windows may block your phone (you'd see a timeout).");
-            println!("             Fix: close this, right-click ezrdp-server.exe > Run as administrator, once.");
+    let app = new_app(&cfg);
+    *app.on_change.lock().unwrap() = Some(Box::new(tray::refresh));
+
+    fn fix_firewall() {
+        let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
+        unsafe {
+            // Shows the Windows "allow changes?" prompt; the elevated copy adds the rule and exits.
+            ShellExecuteW(None, w!("runas"), &HSTRING::from(exe), w!("--setup-firewall"), None, SW_HIDE);
         }
-        firewall::Status::Failed(why) => println!("  Firewall:  couldn't check ({why})"),
     }
-    println!("  Port:      {}", cfg.port);
-    println!("  Password:  {}", cfg.password);
-    println!();
-    println!("Settings file: {}", config_path().display());
-    println!();
+    let _ = tray::FIX_FIREWALL.set(fix_firewall);
 
-    let salt = cfg.salt;
-    type Active = Option<(Arc<session::Shared>, TcpStream)>;
-    let active: Arc<Mutex<Active>> = Arc::new(Mutex::new(None));
-
-    for conn in listener.incoming() {
-        let Ok(mut stream) = conn else { continue };
-        let active = active.clone();
+    // Firewall, router and internet address: in the background so the tray appears at once.
+    {
+        let app = app.clone();
+        let internet = cfg.internet;
         std::thread::spawn(move || {
-            let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
-            let _ = stream.set_nodelay(true);
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
-            let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
-            let login = match login::authenticate(&mut stream, &master, &salt) {
-                Ok(Some(l)) => l,
-                _ => {
-                    println!("Rejected connection from {peer} (wrong password?)");
-                    return;
+            let fw = match firewall::allow() {
+                firewall::Status::Ok => true,
+                firewall::Status::NeedsAdmin => {
+                    fix_firewall();
+                    std::thread::sleep(Duration::from_secs(10));
+                    matches!(firewall::allow(), firewall::Status::Ok)
+                }
+                firewall::Status::Failed(why) => {
+                    log!("firewall: {why}");
+                    false
                 }
             };
-            let shared = session::new_shared();
-            {
-                let mut slot = active.lock().unwrap();
-                if let Some((old, old_stream)) = slot.take() {
-                    session::kick(&old, &old_stream);
+            tray::FIREWALL_OK.store(fw, std::sync::atomic::Ordering::Relaxed);
+            let router = reach_internet(app.clone(), internet);
+            let fw_text = if fw { "Firewall: allowed" } else { "Firewall: NOT set up (use the tray menu to fix)" };
+            log!("{fw_text}\n{router}");
+            *tray::EXTRA_INFO.lock().unwrap() = format!("{fw_text}\n{router}");
+            // Keep the internet address fresh (it can change).
+            loop {
+                std::thread::sleep(Duration::from_secs(30 * 60));
+                if let Some(ip) = stun::public_ip() {
+                    *app.public_ip.lock().unwrap() = Some(ip);
                 }
-                *slot = Some((shared.clone(), stream.try_clone().unwrap()));
-            }
-            println!("Phone connected: {peer}");
-            let home = lan_ip().map(|ip| ip.to_string());
-            session::run(stream, login, home, shared.clone());
-            println!("Phone disconnected: {peer}");
-            let mut slot = active.lock().unwrap();
-            if slot.as_ref().is_some_and(|(s, _)| Arc::ptr_eq(s, &shared)) {
-                *slot = None;
             }
         });
     }
+
+    std::thread::spawn({
+        let app = app.clone();
+        move || discovery::run(app)
+    });
+    std::thread::spawn({
+        let app = app.clone();
+        move || {
+            if let Err(e) = server::listen(app, tray::approve, on_session) {
+                log!("Can't listen on the port: {e}");
+                unsafe {
+                    MessageBoxW(
+                        None,
+                        &HSTRING::from(format!("EzRDP can't start: port is in use ({e}).")),
+                        w!("EzRDP"),
+                        MB_OK | MB_ICONERROR,
+                    );
+                }
+                std::process::exit(1);
+            }
+        }
+    });
+
+    fn on_session(stream: std::net::TcpStream, l: login::Login, info: Vec<u8>, app: Arc<App>) {
+        tray::notify("Phone connected", &format!("{} is now controlling this PC.", l.device_name));
+        session::run(stream, l, info, app);
+    }
+
+    log!("EzRDP started: {} ({} trusted phones)", app.pc_name, app.trusted.lock().unwrap().devices.len());
+    if app.trusted.lock().unwrap().devices.is_empty() {
+        tray::notify(
+            "EzRDP is running",
+            "Open EzRDP on your phone (same Wi-Fi) and tap this PC to pair it.",
+        );
+    }
+    tray::run(app);
 }

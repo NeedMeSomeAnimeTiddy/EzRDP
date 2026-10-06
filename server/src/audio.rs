@@ -19,7 +19,7 @@ pub fn run(shared: &Shared, tx: &Sender) {
             continue;
         }
         if let Err(e) = capture(shared, tx) {
-            eprintln!("audio: {e}");
+            crate::log!("audio: {e}");
             std::thread::sleep(Duration::from_secs(1));
         }
     }
@@ -46,7 +46,7 @@ fn capture(shared: &Shared, tx: &Sender) -> windows::core::Result<()> {
         CoTaskMemFree(Some(fmt_ptr as *const _));
         init?;
         if !(float && bits == 32) && bits != 16 {
-            eprintln!("audio: unsupported format ({bits}-bit), audio disabled");
+            crate::log!("audio: unsupported format ({bits}-bit), audio disabled");
             shared.audio_on.store(false, Relaxed);
             return Ok(());
         }

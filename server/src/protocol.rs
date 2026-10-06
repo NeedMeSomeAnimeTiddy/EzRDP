@@ -8,12 +8,12 @@ use std::sync::Mutex;
 
 use crate::crypto::{Seal, TAG};
 
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 3;
 pub const DEFAULT_PORT: u16 = 7270;
 
 // Server -> client
-pub const S_HELLO: u8 = 0x01; // version u8, salt [16], rounds u32, nonce [16]
-pub const S_AUTH_RESULT: u8 = 0x02; // ok u8
+pub const S_HELLO: u8 = 0x01; // version u8, pc_id [16], nonce [16], flags u8 (1 = paused), pc name utf8
+pub const S_AUTH_RESULT: u8 = 0x02; // RESULT_* u8
 pub const S_MONITORS: u8 = 0x03; // count u8, then per monitor: index u8, primary u8, w u16, h u16, name_len u16, name utf8
 pub const S_VIDEO_CONFIG: u8 = 0x04; // monitor u8, video w u16, video h u16
 pub const S_VIDEO_FRAME: u8 = 0x05; // frame id u32, keyframe u8, h264 annex-b data
@@ -21,10 +21,12 @@ pub const S_CURSOR: u8 = 0x06; // x f32, y f32 (0..1 of monitor), visible u8
 pub const S_AUDIO_CONFIG: u8 = 0x07; // sample rate u32, channels u8
 pub const S_AUDIO: u8 = 0x08; // s16le interleaved PCM
 pub const S_PING: u8 = 0x09; // (empty) keep-alive so the phone can spot dead connections
-pub const S_INFO: u8 = 0x0A; // home (LAN) address utf8, so the phone can go direct when at home
+pub const S_INFO: u8 = 0x0A; // home ip (u8 len + utf8), internet ip (u8 len + utf8), port u16
+pub const S_PAIR_KEY: u8 = 0x0B; // PC public key [65]
+pub const S_PAIR_RESULT: u8 = 0x0C; // RESULT_* u8, then device id [16] if ok
 
 // Client -> server
-pub const C_AUTH: u8 = 0x81; // nonce [16], proof [32], quality u8
+pub const C_AUTH: u8 = 0x81; // device id [16], nonce [16], proof [32], quality u8
 pub const C_MOUSE_ABS: u8 = 0x82; // x f32, y f32 (0..1 of monitor)
 pub const C_MOUSE_REL: u8 = 0x83; // dx f32, dy f32 (fraction of monitor width/height)
 pub const C_MOUSE_BUTTON: u8 = 0x84; // button u8 (0 left, 1 right, 2 middle), down u8
@@ -37,6 +39,14 @@ pub const C_SET_AUDIO: u8 = 0x8A; // on u8
 pub const C_KEYFRAME: u8 = 0x8B; // (empty)
 pub const C_SET_QUALITY: u8 = 0x8C; // quality u8 (0 high, 1 balanced, 2 data saver)
 pub const C_PING: u8 = 0x8D; // (empty)
+pub const C_PAIR_START: u8 = 0x8E; // commitment [32], phone name utf8
+pub const C_PAIR_KEY: u8 = 0x8F; // phone public key [65]
+
+pub const RESULT_DENIED: u8 = 0; // wrong/untrusted phone, or user clicked Deny
+pub const RESULT_OK: u8 = 1;
+pub const RESULT_PAUSED: u8 = 2;
+pub const RESULT_NOT_LOCAL: u8 = 3; // pairing only works on the home network
+pub const RESULT_BUSY: u8 = 4; // another phone is pairing right now
 
 const MAX_CLIENT_MSG: usize = 64 * 1024;
 

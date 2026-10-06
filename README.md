@@ -33,50 +33,51 @@ In **Touch mode** the pointer jumps to your finger: tap = click there, drag = dr
 
 ## Setup
 
-### 1. Get the files
+### PC
 
-Open the **Actions** tab on GitHub, open the newest green **Build** run, and download:
-- `EzRDP-PC` → contains `ezrdp-server.exe`
-- `EzRDP-Android` → contains `EzRDP.apk`
-
-(If you push a tag like `v1.0`, both files also show up on the **Releases** page.)
-
-### 2. PC
-
-1. Put `ezrdp-server.exe` in any folder (for example `C:\EzRDP`) and run it.
-2. The first time, right-click it → **Run as administrator** so it can set up Windows Firewall
-   (the window should say `Firewall: allowed`). After that, run it normally.
+1. Put `EzRDP.exe` in a folder you'll keep (for example `C:\EzRDP`) and run it.
    If SmartScreen warns you, click **More info → Run anyway** (the file isn't code-signed).
-3. The window shows your **Address**, **Port** and **Password**. Settings live in `ezrdp.conf` next to the exe.
+2. Windows asks once to allow changes: click **Yes**. That lets EzRDP through Windows Firewall.
+3. EzRDP now lives in the **tray** (the icons next to the clock) and starts with Windows.
+   Right-click its icon for:
+   - **Pause / Resume connections**: while paused, no phone can connect and anyone connected is dropped.
+   - **Trusted phones**: see and remove phones.
+   - **Start with Windows**, **Connection info**, **Quit**.
 
-To start it with Windows: press `Win+R`, type `shell:startup`, and put a shortcut to `ezrdp-server.exe` in that folder.
+### Phone (one time, at home)
 
-### 3. Phone
+1. Install `EzRDP.apk` (allow "install unknown apps" when asked).
+2. Make sure the phone is on the **same Wi-Fi** as the PC and open EzRDP. Your PC shows up by itself.
+3. Tap it. The phone shows a 6-digit code and the PC asks **"A phone wants to control this PC"** with
+   the same code. Click **Yes**.
 
-1. Install `EzRDP.apk` (allow "install unknown apps" for your browser/files app when asked).
-2. Enter the **Address** and **Password** from the PC window. Tap **Connect**.
-3. Tap the **☰** button at the top for the toolbar.
+That's it. From then on, just tap the PC in the list, at home or away. There are no addresses
+or passwords to type: the phone remembers the PC's home and internet addresses and picks the
+right one.
 
-That's it. It works on home Wi-Fi and on mobile data. At home the app automatically switches
-to the faster direct connection.
+### Connecting from outside your home
 
-### How "connect from anywhere" works
+The PC tries to open its port on your router automatically (UPnP). If that doesn't work, forward
+**TCP port 7270** on your router to the PC (Connection info in the tray menu shows its home address).
+If your internet provider uses CGNAT (Connection info will say so), outside connections can't reach
+your PC at all; use Tailscale in that case.
 
-- On start, EzRDP asks your router to open its port (UPnP). Most home routers allow this by default.
-- Everything is encrypted (AES-GCM) with a key made from your password. The password itself is never sent.
-- If the PC window says it **couldn't open to the internet**:
-  - "no UPnP router found" / "router refused": turn on UPnP in your router settings, or
-    forward **TCP port 7270** to this PC by hand.
-  - "your internet provider shares one address": your provider uses CGNAT, so nothing from the
-    internet can reach your PC directly. Ask them for a public IP, or use Tailscale instead.
-- Your home internet address can change now and then (most providers). If the phone stops
-  connecting from outside, check the Address in the PC window and update it in the app.
-- Don't want it reachable from outside? Set `internet=off` in `ezrdp.conf`.
+If your home internet address changes, the phone learns the new one the next time it connects at
+home. People with a DDNS name can set it per PC: long-press the PC in the app → Set internet address.
+
+## Security
+
+- Pairing only works from the home network, and only after you click Yes on the PC.
+- Pairing uses P-256 key exchange with a commitment and a 6-digit comparison code (like Bluetooth),
+  so nobody can sneak in between the phone and the PC while pairing.
+- Every connection logs in with the phone's own key and is encrypted with AES-128-GCM.
+- Remove a phone from the tray menu and it can't connect any more.
 
 ## Limits
 
 - The PC must be signed in. The Windows lock screen and UAC prompts can't be shown (Windows blocks that for normal apps). The picture comes back when they're gone.
 - One phone at a time. A new connection takes over from the old one.
+- EzRDP runs as a tray app, not a Windows service: services can't see your screen.
 
 ## How it works (short)
 
@@ -84,7 +85,6 @@ to the faster direct connection.
 - Video: H.264 (OpenH264, screen-content mode) → hardware decoder on the phone, with low-latency mode.
 - Lag control: the PC only sends a new frame once the phone has confirmed the earlier ones, so delay can't pile up on slow connections.
 - Input: Windows `SendInput`. Sound: WASAPI loopback → raw 16-bit PCM.
-- Security: PBKDF2 password key, HMAC challenge login, AES-128-GCM on every message.
 
 ## Building yourself
 

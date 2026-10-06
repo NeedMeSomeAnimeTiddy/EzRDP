@@ -324,7 +324,7 @@ impl Source {
                 Ok(g) => {
                     static NOTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
                     if !NOTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                        eprintln!("Fast screen capture unavailable ({e}); using backup capture.");
+                        crate::log!("Fast screen capture unavailable ({e}); using backup capture.");
                     }
                     Ok(Source::Backup(g, std::time::Instant::now(), index))
                 }

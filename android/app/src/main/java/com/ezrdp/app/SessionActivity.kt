@@ -23,6 +23,7 @@ class SessionActivity : Activity(), ConnectionListener {
     private lateinit var remote: RemoteView
     private lateinit var keyInput: KeyInput
     private lateinit var status: TextView
+    private lateinit var statusBox: View
     private lateinit var toolbar: View
     private lateinit var keysBar: View
     private lateinit var soundBtn: TextView
@@ -33,9 +34,10 @@ class SessionActivity : Activity(), ConnectionListener {
     private val decoder = VideoDecoder { conn?.requestKeyframe() }
     private val audio = AudioPlayer()
 
-    private lateinit var host: String
+    private lateinit var store: PcStore
+    private lateinit var pc: SavedPc
+    private var liveHost: String? = null
     private var port = 7270
-    private lateinit var password: String
     private var quality = 1
     private var soundOn = false
     private var monitors: List<MonitorInfo> = emptyList()
@@ -48,11 +50,17 @@ class SessionActivity : Activity(), ConnectionListener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        host = intent.getStringExtra("host") ?: ""
-        port = intent.getIntExtra("port", 7270)
-        password = intent.getStringExtra("password") ?: ""
-        quality = intent.getIntExtra("quality", 1)
+        store = PcStore(this)
+        val saved = store.get(intent.getStringExtra("pc") ?: "")
+        if (saved == null) {
+            finish()
+            return
+        }
+        pc = saved
+        liveHost = intent.getStringExtra("liveHost")
+        port = intent.getIntExtra("livePort", pc.port)
         val prefs = getSharedPreferences("ezrdp", MODE_PRIVATE)
+        quality = prefs.getInt("quality", 1)
         soundOn = prefs.getBoolean("sound", false)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -77,10 +85,16 @@ class SessionActivity : Activity(), ConnectionListener {
             setTextColor(Color.WHITE)
             textSize = 16f
             gravity = Gravity.CENTER
-            setPadding(dp(20), dp(12), dp(20), dp(12))
-            background = rounded(0xDD202228.toInt(), dp(12).toFloat())
         }
-        root.addView(status, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
+        statusBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(24), dp(16), dp(24), dp(14))
+            background = rounded(0xDD202228.toInt(), dp(12).toFloat())
+            addView(status)
+            addView(pill("Cancel") { finish() }, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(12) })
+        }
+        root.addView(statusBox, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
 
         val bars = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -257,6 +271,7 @@ class SessionActivity : Activity(), ConnectionListener {
 
     override fun onStart() {
         super.onStart()
+        if (!::pc.isInitialized) return
         running = true
         attempt = 0
         connect()
@@ -278,19 +293,26 @@ class SessionActivity : Activity(), ConnectionListener {
 
     private fun showStatus(text: String?) {
         status.text = text ?: ""
-        status.visibility = if (text == null) View.GONE else View.VISIBLE
+        statusBox.visibility = if (text == null) View.GONE else View.VISIBLE
+    }
+
+    /** Addresses to try, best first: found on this Wi-Fi now, last home address, then internet. */
+    private fun targets(): List<Pair<String, Int>> {
+        val list = ArrayList<Pair<String, Int>>()
+        liveHost?.let { list.add(it to 6000) }
+        if (pc.home.isNotEmpty()) list.add(pc.home to 1200)
+        if (pc.manual.isNotEmpty()) list.add(pc.manual to 6000)
+        if (pc.internet.isNotEmpty()) list.add(pc.internet to 6000)
+        return list.distinctBy { it.first }
     }
 
     private fun connect() {
-        showStatus(if (attempt == 0) "Connecting to $host…" else "Reconnecting…")
+        showStatus(if (attempt == 0) "Connecting to ${pc.name}…" else "Reconnecting…")
         Thread {
-            // At home, go straight to the PC's home address (faster); otherwise use the one typed in.
-            val prefs = getSharedPreferences("ezrdp", MODE_PRIVATE)
-            val home = prefs.getString("home_$host", null)
-            val targets = listOfNotNull(home?.takeIf { it != host }?.let { it to 1200 }, host to 6000)
             var lastError: Exception? = null
-            for ((addr, timeout) in targets) {
-                val c = Connection(addr, port, password, quality, this, timeout)
+            for ((addr, timeout) in targets()) {
+                if (!running) return@Thread
+                val c = Connection(addr, port, pc.id.fromHex(), pc.deviceId, pc.key, quality, this, timeout)
                 try {
                     c.open()
                     ui.post {
@@ -309,12 +331,16 @@ class SessionActivity : Activity(), ConnectionListener {
                 } catch (e: Exception) {
                     c.close()
                     lastError = e
-                    if (e is AuthException || e is VersionException) break
+                    if (e is NotTrustedException || e is VersionException || e is PausedException) break
                 }
             }
             ui.post {
                 when (lastError) {
-                    is AuthException -> fail("Wrong password. Check the password shown on your PC.")
+                    is NotTrustedException -> {
+                        store.remove(pc.id)
+                        fail("${pc.name} no longer trusts this phone. Add it again from the list while you're on the same Wi-Fi.")
+                    }
+                    is PausedException -> fail("Connections are paused on ${pc.name}. Right-click the EzRDP icon on the PC and choose Resume.")
                     is VersionException -> fail("The PC and phone apps are different versions. Update both.")
                     else -> retry()
                 }
@@ -325,18 +351,17 @@ class SessionActivity : Activity(), ConnectionListener {
     private fun retry() {
         if (!running) return
         attempt++
-        if (attempt > (if (everConnected) 20 else 3)) {
+        if (attempt > (if (everConnected) 20 else 2)) {
+            val away = liveHost == null
             fail(
-                "Can't reach $host:$port.\n\n" +
-                    "• Is EzRDP running on the PC, and does its window say \"Firewall: allowed\"?\n" +
-                    "• Using your internet address? Test with Wi-Fi OFF (mobile data). Many routers " +
-                    "can't reach their own internet address from inside the home.\n" +
-                    "• Port forward: TCP $port must point to the \"Home IP\" shown on the PC.\n" +
-                    "• At home, the Home IP from the PC window always works.",
+                "Can't reach ${pc.name}.\n\n" +
+                    "• Is the PC on, with EzRDP running (icon next to the clock)?\n" +
+                    (if (away) "• From outside your home, your router must let EzRDP in: check \"Connection info\" in the EzRDP tray menu on the PC.\n" else "") +
+                    "• At home, make sure the phone is on the same Wi-Fi.",
             )
             return
         }
-        showStatus("Can't reach the PC, retrying…")
+        showStatus("Can't reach ${pc.name}, retrying…")
         ui.postDelayed({ if (running) connect() }, 1500)
     }
 
@@ -386,8 +411,13 @@ class SessionActivity : Activity(), ConnectionListener {
         if (soundOn) audio.write(data, offset, length)
     }
 
-    override fun onHomeAddress(ip: String) {
-        getSharedPreferences("ezrdp", MODE_PRIVATE).edit().putString("home_$host", ip).apply()
+    override fun onAddresses(home: String, internet: String, port: Int) {
+        ui.post {
+            if (home.isNotEmpty()) pc.home = home
+            if (internet.isNotEmpty()) pc.internet = internet
+            pc.port = port
+            store.save(pc)
+        }
     }
 
     override fun onDisconnected(error: Exception?) {

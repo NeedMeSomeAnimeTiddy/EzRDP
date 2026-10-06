@@ -20,15 +20,15 @@ pub enum Status {
     Failed(String),
 }
 
-/// Adds an allow rule for this exe (all network types), replacing any stale one.
-pub fn allow(port: u16) -> Status {
+/// Adds an allow rule for this exe (TCP for connections, UDP for being found on Wi-Fi;
+/// all network types), replacing any stale one.
+pub fn allow() -> Status {
     let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
-    // Already set up for this exact exe and port?
-    if let Some((true, text)) = netsh(&["advfirewall", "firewall", "show", "rule", &format!("name={RULE}"), "verbose"]) {
-        let lower = text.to_lowercase();
-        if lower.contains(&exe.to_lowercase()) && lower.contains(&port.to_string()) {
-            return Status::Ok;
-        }
+    // Already set up for this exact exe?
+    if let Some((true, text)) = netsh(&["advfirewall", "firewall", "show", "rule", &format!("name={RULE}"), "verbose"])
+        && text.to_lowercase().contains(&exe.to_lowercase())
+    {
+        return Status::Ok;
     }
     let _ = netsh(&["advfirewall", "firewall", "delete", "rule", &format!("name={RULE}")]);
     match netsh(&[
@@ -39,8 +39,6 @@ pub fn allow(port: u16) -> Status {
         &format!("name={RULE}"),
         "dir=in",
         "action=allow",
-        "protocol=TCP",
-        &format!("localport={port}"),
         &format!("program={exe}"),
         "profile=any",
         "enable=yes",

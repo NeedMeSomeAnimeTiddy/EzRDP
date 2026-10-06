@@ -1,4 +1,4 @@
-//! One connected phone: auth, then a video thread, an audio thread and an input loop.
+//! One connected phone: a video thread, an audio thread and an input loop.
 
 use crate::capture::{CapError, Monitor, Source, monitors};
 use crate::convert::{Yuv, out_size};
@@ -34,13 +34,12 @@ impl Shared {
     }
 }
 
-/// Runs a session until the phone disconnects or `kick` is set by a newer connection.
-pub fn run(stream: TcpStream, login: Login, lan_ip: Option<String>, shared: Arc<Shared>) {
+/// Runs a session until the phone disconnects or the socket is shut down (new phone / Pause).
+pub fn run(stream: TcpStream, login: Login, info: Vec<u8>, _app: Arc<crate::state::App>) {
+    let shared = new_shared();
     let tx = Arc::new(Sender::new(stream.try_clone().unwrap(), login.tx));
     shared.quality.store(login.quality, Relaxed);
-    if let Some(ip) = lan_ip {
-        let _ = tx.send(S_INFO, ip.as_bytes());
-    }
+    let _ = tx.send(S_INFO, &info);
 
     let mons = monitors();
     let primary = mons.iter().position(|m| m.primary).unwrap_or(0);
@@ -79,7 +78,7 @@ pub fn run(stream: TcpStream, login: Login, lan_ip: Option<String>, shared: Arc<
     let _ = pinger.join();
 }
 
-pub fn new_shared() -> Arc<Shared> {
+fn new_shared() -> Arc<Shared> {
     Arc::new(Shared {
         stop: AtomicBool::new(false),
         audio_on: AtomicBool::new(false),
@@ -92,10 +91,6 @@ pub fn new_shared() -> Arc<Shared> {
     })
 }
 
-pub fn kick(shared: &Shared, stream: &TcpStream) {
-    shared.stop.store(true, Relaxed);
-    let _ = stream.shutdown(Shutdown::Both);
-}
 
 fn send_monitors(tx: &Sender, mons: &[Monitor]) -> std::io::Result<()> {
     let mut p = vec![mons.len() as u8];
@@ -184,7 +179,7 @@ fn video_loop(tx: &Sender, shared: &Shared) {
             Err(e) => {
                 // Happens briefly on the lock screen, UAC prompts and display changes.
                 if last_error.as_deref() != Some(e.as_str()) {
-                    eprintln!("capture unavailable: {e}");
+                    crate::log!("capture unavailable: {e}");
                     last_error = Some(e);
                 }
                 std::thread::sleep(Duration::from_millis(500));
@@ -195,7 +190,7 @@ fn video_loop(tx: &Sender, shared: &Shared) {
         let mut enc = match H264::new(q) {
             Ok(e) => e,
             Err(e) => {
-                eprintln!("encoder error: {e}");
+                crate::log!("encoder error: {e}");
                 break;
             }
         };
@@ -235,7 +230,7 @@ fn video_loop(tx: &Sender, shared: &Shared) {
                 }
                 Err(CapError::Lost) => continue 'outer,
                 Err(CapError::Other(e)) => {
-                    eprintln!("capture error: {e}");
+                    crate::log!("capture error: {e}");
                     continue 'outer;
                 }
             }
@@ -272,7 +267,7 @@ fn video_loop(tx: &Sender, shared: &Shared) {
                     }
                 }
                 Ok(None) => need_send = true, // encoder skipped it to save bandwidth; try again
-                Err(e) => eprintln!("encode error: {e}"),
+                Err(e) => crate::log!("encode error: {e}"),
             }
         }
     }
