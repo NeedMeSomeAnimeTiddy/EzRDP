@@ -113,9 +113,11 @@ own sound back (that would echo forever).
 
 1. Download `ezrdp-linux`, make it runnable and start it from your desktop:
    `chmod +x ezrdp-linux && ./ezrdp-linux`
-   The EzRDP window opens, and while EzRDP runs your phone or other PCs can control this PC.
-   Closing the window keeps that going (stop it with Ctrl+C, or `--window` to only open the window).
-2. To let others control this PC from when you sign in: `./ezrdp-linux --autostart` (undo with `--autostart off`).
+   EzRDP puts an icon in the panel (next to the clock) and opens its window. While it runs, your phone
+   or other PCs can control this PC. Closing the window keeps that going.
+2. The icon's menu: **Control another PC...** (or just click the icon), **Pause connections**,
+   **Trusted devices**, **Connection info**, **Start when I sign in**, **Quit EzRDP**.
+   Starting EzRDP again while it runs just opens the window.
 3. If you use a firewall, let port 7270 in: `sudo ufw allow 7270`.
 
 Notes:
@@ -124,6 +126,8 @@ Notes:
   remembered after that. Desktops without remote control support (Sway, Hyprland) share the picture only.
 - Pairing asks with a desktop dialog if `zenity` or `kdialog` is installed, otherwise in the terminal.
 - Sound needs `parec` (package `pulseaudio-utils`; works with PipeWire too).
+- On plain GNOME (e.g. Fedora) the panel icon needs the "AppIndicator and KStatusNotifierItem Support"
+  extension; Ubuntu, KDE, Cinnamon, XFCE and MATE show it as is.
 - Settings, trusted devices and the log are in `~/.config/ezrdp/`. Delete a line in `trusted.txt` to remove a device.
 - Needs OpenGL, ALSA, PipeWire and `libxkbcommon-x11`, which normal desktops already have.
 
@@ -176,7 +180,7 @@ home. People with a DDNS name can set it per PC: long-press the PC in the app â†
 - One phone at a time. A new connection takes over from the old one.
 - Clicks and typing always go to the screen the phone is showing (the mouse is moved there first).
 - EzRDP runs as a tray app, not a Windows service: services can't see your screen.
-- Linux PC: no graphics-card video encoding, no "being controlled" banner, no tray icon,
+- Linux PC: no graphics-card video encoding, no "being controlled" banner,
   and it can't show a phone's screen. The screen saver can still lock the PC while it's being controlled.
 - When controlling another PC you see your own mouse pointer; the other PC's pointer shape (text cursor, hand...) isn't shown.
 

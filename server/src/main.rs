@@ -59,6 +59,9 @@ mod overlay;
 #[path = "linux/wayland.rs"]
 mod wayland;
 #[cfg(target_os = "linux")]
+#[path = "linux/tray.rs"]
+mod tray;
+#[cfg(target_os = "linux")]
 mod session;
 
 // The window for controlling other PCs (same program, so there's one app to install).
@@ -272,11 +275,21 @@ fn approve_linux(name: &str, code: u32) -> bool {
     false
 }
 
+#[cfg(target_os = "linux")]
+fn autostart_file() -> PathBuf {
+    data_path("").parent().map(|p| p.join("autostart")).unwrap_or_default().join("ezrdp.desktop")
+}
+
+#[cfg(target_os = "linux")]
+pub fn linux_autostart_enabled() -> bool {
+    autostart_file().exists()
+}
+
 /// Starts EzRDP when you sign in to the desktop (or stops doing that).
 #[cfg(target_os = "linux")]
-fn linux_autostart(on: bool) {
-    let dir = data_path("").parent().map(|p| p.join("autostart")).unwrap_or_default();
-    let file = dir.join("ezrdp.desktop");
+pub fn linux_autostart(on: bool) {
+    let file = autostart_file();
+    let dir = file.parent().map(PathBuf::from).unwrap_or_default();
     if on {
         let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
         let _ = std::fs::create_dir_all(&dir);
@@ -294,7 +307,7 @@ fn linux_autostart(on: bool) {
 /// Lets phones and other PCs control this PC, in the background. Returns the thread that keeps
 /// listening, or why this PC can't be controlled.
 #[cfg(target_os = "linux")]
-fn linux_host() -> Result<std::thread::JoinHandle<()>, String> {
+fn linux_host() -> Result<Arc<App>, String> {
     use std::time::Duration;
     // On Wayland the desktop asks permission when someone first connects; on X11 check now.
     if !wayland::active() && capture::monitors().is_empty() {
@@ -328,6 +341,11 @@ fn linux_host() -> Result<std::thread::JoinHandle<()>, String> {
             log!("{} wanted to share its screen; showing a phone's screen only works on Windows for now.", l.device_name);
             return;
         }
+        // A desktop notification, like the Windows tray balloon (if notify-send is installed).
+        let _ = std::process::Command::new("notify-send")
+            .args(["EzRDP", &format!("{} is now controlling this PC.", l.device_name)])
+            .stderr(std::process::Stdio::null())
+            .spawn();
         session::run(stream, l, info, app);
     }
 
@@ -342,11 +360,50 @@ fn linux_host() -> Result<std::thread::JoinHandle<()>, String> {
         data_path("").display()
     );
     let port = cfg.port;
-    Ok(std::thread::spawn(move || {
-        if let Err(e) = server::listen(app, approve_linux, on_session) {
-            log!("Other devices can't control this PC: port {port} is in use ({e}). Is EzRDP already running?");
+    std::thread::spawn({
+        let app = app.clone();
+        move || {
+            if let Err(e) = server::listen(app, approve_linux, on_session) {
+                log!("Other devices can't control this PC: port {port} is in use ({e}).");
+            }
         }
-    }))
+    });
+    Ok(app)
+}
+
+/// Where a running EzRDP listens for "open your window" from a second start.
+#[cfg(target_os = "linux")]
+fn instance_socket() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("ezrdp.sock")
+}
+
+/// Becomes the running EzRDP: later starts ask it to open the window instead of starting again.
+#[cfg(target_os = "linux")]
+fn claim_instance() {
+    use std::io::Read;
+    use std::os::unix::net::UnixListener;
+    let path = instance_socket();
+    let _ = std::fs::remove_file(&path);
+    let Ok(listener) = UnixListener::bind(&path) else { return };
+    std::thread::spawn(move || {
+        for mut conn in listener.incoming().flatten() {
+            let mut b = [0u8; 1];
+            if conn.read_exact(&mut b).is_ok() && b[0] == b'w' {
+                open_window();
+            }
+        }
+    });
+}
+
+/// Opens the window for controlling another PC, as its own process so the tray keeps going.
+#[cfg(target_os = "linux")]
+pub fn open_window() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Ok(mut child) = std::process::Command::new(exe).arg("--window").spawn()
+    {
+        // Collect it when the window closes, so it doesn't linger as a dead process.
+        std::thread::spawn(move || child.wait());
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -358,9 +415,9 @@ fn main() {
         "--help" | "-h" => {
             println!(
                 "EzRDP: control other PCs from this one, and let your phone or other PCs control this one.\n\n\
-                 ezrdp                    open the EzRDP window; this PC can be controlled while EzRDP runs\n\
-                 ezrdp --window           only the window (this PC can't be controlled)\n\
-                 ezrdp --background       no window, just let others control this PC\n\
+                 ezrdp                    tray icon + the EzRDP window; this PC can be controlled while EzRDP runs\n\
+                 ezrdp --background       tray icon only (what starting at sign-in uses)\n\
+                 ezrdp --window           only the window\n\
                  ezrdp --autostart        let others control this PC from when you sign in\n\
                  ezrdp --autostart off    undo that\n\n\
                  Settings and trusted devices: {}",
@@ -376,28 +433,30 @@ fn main() {
         }
         _ => {}
     }
-    log::init(data_path("ezrdp.log"));
-    let host = linux_host();
-    if arg == "--background" {
-        match host {
-            Ok(h) => {
-                let _ = h.join();
-            }
-            Err(e) => log!("{e}"),
+    // Already running? Ask it to open its window (not for --background) and stop here.
+    if let Ok(mut conn) = std::os::unix::net::UnixStream::connect(instance_socket()) {
+        if arg != "--background" {
+            use std::io::Write;
+            let _ = conn.write_all(b"w");
         }
         return;
     }
-    if let Err(e) = &host {
-        log!("{e}");
+    log::init(data_path("ezrdp.log"));
+    claim_instance();
+    let (app, problem) = match linux_host() {
+        Ok(app) => (Some(app), None),
+        Err(e) => {
+            log!("{e}");
+            (None, Some(e))
+        }
+    };
+    tray::run(app, problem);
+    if arg != "--background" {
+        open_window();
     }
-    if let Err(e) = viewer::run() {
-        log!("Can't open the EzRDP window: {e}");
-    }
-    if let Ok(h) = host
-        && !h.is_finished()
-    {
-        log!("The window is closed, but this PC can still be controlled. Press Ctrl+C here (or end EzRDP) to stop.");
-        let _ = h.join();
+    // The tray menu's Quit (or Ctrl+C) ends EzRDP.
+    loop {
+        std::thread::park();
     }
 }
 
