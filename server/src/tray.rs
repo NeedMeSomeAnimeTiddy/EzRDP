@@ -20,6 +20,7 @@ const ID_INFO: usize = 4;
 const ID_QUIT: usize = 5;
 const ID_ADD_PHONE: usize = 6;
 const ID_FIREWALL: usize = 7;
+const ID_WINDOW: usize = 8;
 const ID_REMOVE_PHONE: usize = 100;
 
 static APP: OnceLock<Arc<App>> = OnceLock::new();
@@ -177,6 +178,7 @@ fn show_menu(app: &App) {
         };
         add(MF_STRING | MF_GRAYED, 0, &status_text(app));
         add(MF_SEPARATOR, 0, "");
+        add(MF_STRING | MF_DEFAULT, ID_WINDOW, "Control another PC...");
         add(MF_STRING, ID_PAUSE, if app.paused() { "Resume connections" } else { "Pause connections" });
 
         let phones = CreatePopupMenu().unwrap_or_default();
@@ -220,6 +222,7 @@ fn handle(app: &App, cmd: usize, devices: &[crate::trust::Device]) {
             }
             app.changed();
         }
+        ID_WINDOW => crate::open_window(),
         ID_AUTOSTART => crate::autostart::set(!crate::autostart::enabled()),
         ID_INFO => {
             let home = crate::server::lan_ip().map(|i| i.to_string()).unwrap_or("unknown".into());

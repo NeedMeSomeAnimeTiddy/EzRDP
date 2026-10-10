@@ -1,13 +1,13 @@
 //! Talking to an EzRDP PC: finding it on the network, pairing, logging in and the live session.
 //! This side plays the same part as the phone app (see android/.../Connection.kt).
 
-use crate::audio::Player;
+use super::audio::Player;
 use crate::crypto::{self, Seal};
 use crate::pairing::{self, KeyPair};
 use crate::protocol::*;
-use crate::store::SavedPc;
+use super::store::SavedPc;
 use crate::trust::hex;
-use crate::video::Video;
+use super::video::Video;
 use std::io::{self, BufReader};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -135,7 +135,8 @@ pub struct Found {
 }
 
 /// Asks "EZRDP?" on the local network every couple of seconds and keeps a list of who answers.
-pub fn discover(found: Arc<Mutex<Vec<Found>>>, ctx: eframe::egui::Context) {
+/// `own` is this PC's id: it answers too, but isn't one to control.
+pub fn discover(found: Arc<Mutex<Vec<Found>>>, ctx: eframe::egui::Context, own: Option<String>) {
     std::thread::spawn(move || {
         let Ok(sock) = UdpSocket::bind("0.0.0.0:0") else { return };
         let _ = sock.set_broadcast(true);
@@ -167,6 +168,9 @@ pub fn discover(found: Arc<Mutex<Vec<Found>>>, ctx: eframe::egui::Context) {
                 host: from.ip().to_string(),
                 seen: Instant::now(),
             };
+            if own.as_deref() == Some(f.id.as_str()) {
+                continue;
+            }
             let mut list = found.lock().unwrap();
             match list.iter_mut().find(|x| x.id == f.id) {
                 Some(x) => *x = f,
