@@ -1,4 +1,4 @@
-//! One connected phone: a video thread, an audio thread and an input loop.
+//! One connected phone or PC: a video thread, an audio thread and an input loop.
 
 use crate::capture::{CapError, Monitor, Source, monitors};
 use crate::convert::{Yuv, out_size};
@@ -12,6 +12,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+#[cfg(windows)]
 use windows::Win32::System::Power::*;
 
 /// Frames sent but not yet confirmed by the phone. Keeping this small stops lag from piling up.
@@ -79,6 +80,7 @@ pub fn run(stream: TcpStream, login: Login, info: Vec<u8>, _app: Arc<crate::stat
         .unwrap_or(0);
     shared.monitor.store(start as u8, Relaxed);
     let _ = send_monitors(&tx, &mons);
+    #[cfg(windows)]
     unsafe {
         // Finer sleep timing for smoother frame pacing.
         windows::Win32::Media::timeBeginPeriod(1);
@@ -121,6 +123,7 @@ pub fn run(stream: TcpStream, login: Login, info: Vec<u8>, _app: Arc<crate::stat
             *cur = None;
         }
     }
+    #[cfg(windows)]
     unsafe {
         windows::Win32::Media::timeEndPeriod(1);
     }
@@ -281,6 +284,7 @@ fn pick_scale(m: &Monitor, q: Quality, max: (usize, usize)) -> usize {
 }
 
 fn video_loop(tx: &Sender, shared: &Shared) {
+    #[cfg(windows)]
     unsafe {
         SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
     }
@@ -442,6 +446,7 @@ fn video_loop(tx: &Sender, shared: &Shared) {
             }
         }
     }
+    #[cfg(windows)]
     unsafe {
         SetThreadExecutionState(ES_CONTINUOUS);
     }

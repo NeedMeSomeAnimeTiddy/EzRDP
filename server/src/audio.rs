@@ -13,13 +13,19 @@ pub fn run(shared: &Shared, tx: &Sender) {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
     }
+    // Log each problem once, not every retry (e.g. no speakers plugged in).
+    let mut last_error = String::new();
     while !shared.stopped() {
         if !shared.audio_on.load(Relaxed) {
             std::thread::sleep(Duration::from_millis(100));
             continue;
         }
         if let Err(e) = capture(shared, tx) {
-            crate::log!("audio: {e}");
+            let e = e.to_string();
+            if e != last_error {
+                crate::log!("audio: {e}");
+                last_error = e;
+            }
             std::thread::sleep(Duration::from_secs(1));
         }
     }

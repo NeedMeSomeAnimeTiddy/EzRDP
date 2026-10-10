@@ -41,6 +41,10 @@ features = [
     "Win32_Media_Multimedia",
 ]
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+x11rb = { version = "0.13", features = ["shm", "randr", "xtest"] }
+
 [profile.release]
 opt-level = 3
 lto = true

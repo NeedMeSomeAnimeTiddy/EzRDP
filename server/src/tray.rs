@@ -162,8 +162,8 @@ fn message(text: &str, flags: MESSAGEBOX_STYLE) -> MESSAGEBOX_RESULT {
 /// Asks the person at the PC whether to trust a new phone. Runs on a network thread.
 pub fn approve(name: &str, code: u32) -> bool {
     let text = format!(
-        "A phone wants to control this PC:\n\n    {name}\n\nCheck the phone shows this code:\n\n    {}\n\n\
-         Only click Yes if it's your phone and the codes match.",
+        "A phone or PC wants to control this PC:\n\n    {name}\n\nCheck it shows this code:\n\n    {}\n\n\
+         Only click Yes if it's yours and the codes match.",
         crate::pairing::format_code(code)
     );
     message(&text, MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES
