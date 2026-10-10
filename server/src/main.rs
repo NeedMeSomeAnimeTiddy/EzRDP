@@ -6,6 +6,7 @@
 mod convert;
 mod crypto;
 mod discovery;
+mod echo;
 mod encoder;
 mod log;
 mod login;
@@ -54,6 +55,9 @@ mod input;
 #[cfg(target_os = "linux")]
 #[path = "linux/overlay.rs"]
 mod overlay;
+#[cfg(target_os = "linux")]
+#[path = "linux/wayland.rs"]
+mod wayland;
 #[cfg(target_os = "linux")]
 mod session;
 
@@ -292,16 +296,11 @@ fn linux_autostart(on: bool) {
 #[cfg(target_os = "linux")]
 fn linux_host() -> Result<std::thread::JoinHandle<()>, String> {
     use std::time::Duration;
-    if capture::monitors().is_empty() {
-        let wayland = std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland");
-        return Err(format!(
-            "Other devices can't control this PC: EzRDP can't see the screen. {}",
-            if wayland {
-                "This desktop uses Wayland; that needs an X11 (Xorg) session. Pick \"... on Xorg\" on the sign-in screen."
-            } else {
-                "Start EzRDP from inside your desktop session (DISPLAY must be set)."
-            }
-        ));
+    // On Wayland the desktop asks permission when someone first connects; on X11 check now.
+    if !wayland::active() && capture::monitors().is_empty() {
+        return Err("Other devices can't control this PC: EzRDP can't see the screen. \
+                    Start EzRDP from inside your desktop session (DISPLAY must be set)."
+            .into());
     }
 
     let cfg = load_config();

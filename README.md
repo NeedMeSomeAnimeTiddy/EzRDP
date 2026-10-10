@@ -106,6 +106,9 @@ In the window:
 
 If the connection drops, the window reconnects by itself for 30 seconds.
 
+Two PCs can control each other at the same time. While a PC plays the other one's sound, it doesn't send its
+own sound back (that would echo forever).
+
 ### Linux
 
 1. Download `ezrdp-linux`, make it runnable and start it from your desktop:
@@ -116,12 +119,13 @@ If the connection drops, the window reconnects by itself for 30 seconds.
 3. If you use a firewall, let port 7270 in: `sudo ufw allow 7270`.
 
 Notes:
-- Being controlled needs an **X11 (Xorg)** desktop session; Wayland isn't supported yet (pick "â€¦ on Xorg" on
-  the sign-in screen). Controlling other PCs from Linux works on Wayland too.
+- Works on X11 (Xorg) and Wayland desktops. On Wayland (GNOME, KDE...) the PC asks once, the first time
+  someone connects, whether to allow screen sharing and remote control; click **Share/Allow** there. It's
+  remembered after that. Desktops without remote control support (Sway, Hyprland) share the picture only.
 - Pairing asks with a desktop dialog if `zenity` or `kdialog` is installed, otherwise in the terminal.
 - Sound needs `parec` (package `pulseaudio-utils`; works with PipeWire too).
 - Settings, trusted devices and the log are in `~/.config/ezrdp/`. Delete a line in `trusted.txt` to remove a device.
-- The window uses OpenGL, ALSA and `libxkbcommon-x11`, which normal desktops already have.
+- Needs OpenGL, ALSA, PipeWire and `libxkbcommon-x11`, which normal desktops already have.
 
 ## Setup
 
@@ -172,7 +176,7 @@ home. People with a DDNS name can set it per PC: long-press the PC in the app â†
 - One phone at a time. A new connection takes over from the old one.
 - Clicks and typing always go to the screen the phone is showing (the mouse is moved there first).
 - EzRDP runs as a tray app, not a Windows service: services can't see your screen.
-- Linux PC: X11 only (no Wayland yet), no graphics-card video encoding, no "being controlled" banner,
+- Linux PC: no graphics-card video encoding, no "being controlled" banner, no tray icon,
   and it can't show a phone's screen. The screen saver can still lock the PC while it's being controlled.
 - When controlling another PC you see your own mouse pointer; the other PC's pointer shape (text cursor, hand...) isn't shown.
 
@@ -185,11 +189,13 @@ home. People with a DDNS name can set it per PC: long-press the PC in the app â†
 - Bitrate adapts: it drops when the network can't keep up and climbs back when it can.
 - Lag control: the PC only sends a new frame once the phone has confirmed the earlier ones, so delay can't pile up on slow connections.
 - Input: Windows `SendInput`. Sound: WASAPI loopback â†’ raw 16-bit PCM.
-- Linux PC: X11 shared-memory screen capture, XTEST for mouse and keyboard, `parec` for sound, OpenH264 video.
+- Linux PC: X11 shared-memory screen capture and XTEST for mouse and keyboard, or on Wayland the desktop's
+  remote desktop portal (picture through PipeWire), `parec` for sound, OpenH264 video.
 - Controlling another PC: OpenH264 decoding, egui window, keyboard sent as typed text (so any layout works) plus real key presses for shortcuts.
 
 ## Building yourself
 
-- PC: install Rust, then `cd server && cargo build --release` (Windows or Linux; on Linux install `libasound2-dev` first)
+- PC: install Rust, then `cd server && cargo build --release` (Windows or Linux; on Linux install
+  `libasound2-dev libpipewire-0.3-dev clang` first)
 - Android: `cd android && ./gradlew assembleRelease` (needs the Android SDK). Builds are signed with
   `android/app/ezrdp.keystore` so every new APK installs as an update over the last one.

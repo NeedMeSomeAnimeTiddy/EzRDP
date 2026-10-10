@@ -93,6 +93,10 @@ fn capture(shared: &Shared, tx: &Sender) -> windows::core::Result<()> {
                 }
                 cap.ReleaseBuffer(frames)?;
             }
+            // Playing another PC's sound here? Don't send it back (it would echo forever).
+            if !out.is_empty() && crate::echo::remote_sound_playing() {
+                out.clear();
+            }
             if !out.is_empty() {
                 if tx.send(S_AUDIO, &out).is_err() {
                     break;

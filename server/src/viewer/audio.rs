@@ -16,6 +16,8 @@ struct Shared {
 
 pub struct Player {
     shared: Arc<Shared>,
+    /// When this PC last noted that it's playing another PC's sound (see crate::echo).
+    marked: Mutex<std::time::Instant>,
 }
 
 /// Keep at most this much sound waiting, so it never lags behind the picture.
@@ -44,7 +46,7 @@ impl Player {
                 std::thread::sleep(Duration::from_millis(100));
             }
         });
-        Self { shared }
+        Self { shared, marked: Mutex::new(std::time::Instant::now() - Duration::from_secs(10)) }
     }
 
     pub fn configure(&self, rate: u32, channels: u8) {
@@ -55,6 +57,12 @@ impl Player {
 
     /// Adds s16le interleaved samples.
     pub fn push(&self, data: &[u8]) {
+        let mut marked = self.marked.lock().unwrap();
+        if marked.elapsed() > Duration::from_millis(500) {
+            *marked = std::time::Instant::now();
+            crate::echo::playing_remote_sound();
+        }
+        drop(marked);
         let ch = self.shared.channels.load(Relaxed) as usize;
         let rate = self.shared.rate.load(Relaxed) as f32;
         let mut q = self.shared.queue.lock().unwrap();

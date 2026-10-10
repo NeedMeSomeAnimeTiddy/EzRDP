@@ -204,6 +204,8 @@ fn char_keysym(c: char) -> Keysym {
 
 pub struct Input {
     x: Option<X>,
+    /// On Wayland, mouse and keys go through the desktop's remote desktop portal instead.
+    wl: Option<std::sync::Arc<super::wayland::Portal>>,
     /// Leftover sub-pixel movement from relative moves, and part-notches of scrolling.
     frac: (f64, f64),
     scroll_left: (i32, i32),
@@ -213,11 +215,15 @@ pub struct Input {
 
 impl Input {
     pub fn new() -> Self {
+        if super::wayland::active() {
+            let wl = super::wayland::portal().map_err(|e| crate::log!("Can't control the mouse and keyboard: {e}")).ok();
+            return Self { x: None, wl, frac: (0.0, 0.0), scroll_left: (0, 0), held_keys: Vec::new(), held_buttons: [false; 3] };
+        }
         let x = X::open();
         if x.is_none() {
             crate::log!("Can't control the mouse and keyboard: no X display");
         }
-        Self { x, frac: (0.0, 0.0), scroll_left: (0, 0), held_keys: Vec::new(), held_buttons: [false; 3] }
+        Self { x, wl: None, frac: (0.0, 0.0), scroll_left: (0, 0), held_keys: Vec::new(), held_buttons: [false; 3] }
     }
 
     fn move_to(&self, x: i32, y: i32) {
@@ -229,6 +235,9 @@ impl Input {
 
     /// Moves to a point given as 0..1 fractions of the monitor.
     pub fn move_abs(&mut self, m: &Monitor, fx: f32, fy: f32) {
+        if let Some(w) = &self.wl {
+            return w.move_abs(m, fx, fy);
+        }
         let x = m.x + (fx.clamp(0.0, 1.0) * (m.w - 1) as f32).round() as i32;
         let y = m.y + (fy.clamp(0.0, 1.0) * (m.h - 1) as f32).round() as i32;
         self.frac = (0.0, 0.0);
@@ -237,6 +246,9 @@ impl Input {
 
     /// Moves relative to the current position; deltas are fractions of the monitor size.
     pub fn move_rel(&mut self, m: &Monitor, fx: f32, fy: f32) {
+        if let Some(w) = &self.wl {
+            return w.move_rel(m, fx, fy);
+        }
         let Some((px, py)) = self.x.as_ref().and_then(X::pointer) else { return };
         let dx = fx as f64 * m.w as f64 + self.frac.0;
         let dy = fy as f64 * m.h as f64 + self.frac.1;
@@ -253,6 +265,7 @@ impl Input {
     /// If the mouse is on a different screen than the one being viewed, brings it to the middle
     /// of the viewed one, so clicks and typing go where the other side is looking.
     pub fn ensure_on(&mut self, m: &Monitor) {
+        // On Wayland every move names its screen, so there's nothing to do.
         if let Some((x, y)) = self.x.as_ref().and_then(X::pointer)
             && (x < m.x || x >= m.x + m.w || y < m.y || y >= m.y + m.h)
         {
@@ -268,6 +281,9 @@ impl Input {
             _ => return,
         };
         self.held_buttons[b as usize] = down;
+        if let Some(w) = &self.wl {
+            return w.button(b, down);
+        }
         if let Some(c) = &self.x {
             c.fake(if down { BUTTON_PRESS_EVENT } else { BUTTON_RELEASE_EVENT }, detail, 0, 0);
             c.flush();
@@ -276,9 +292,18 @@ impl Input {
 
     /// 120 = one wheel notch (as on Windows). X scrolls with buttons 4-7, one click per notch.
     pub fn scroll(&mut self, dy: i16, dx: i16) {
-        let Some(c) = &self.x else { return };
         self.scroll_left.0 += dy as i32;
         self.scroll_left.1 += dx as i32;
+        if let Some(w) = &self.wl {
+            let (ny, nx) = (self.scroll_left.0 / 120, self.scroll_left.1 / 120);
+            self.scroll_left.0 -= ny * 120;
+            self.scroll_left.1 -= nx * 120;
+            // Wayland counts down/right as positive; a Windows wheel notch up is +120.
+            w.scroll(true, -ny);
+            w.scroll(false, nx);
+            return;
+        }
+        let Some(c) = &self.x else { return };
         let clicks = |left: &mut i32, pos: u8, neg: u8| {
             let n = *left / 120;
             *left -= n * 120;
@@ -301,6 +326,12 @@ impl Input {
         } else {
             self.held_keys.retain(|&k| k != vk);
         }
+        if let Some(w) = &self.wl {
+            if let Some(sym) = keysym(vk) {
+                w.key(sym, down);
+            }
+            return;
+        }
         let Some(c) = &self.x else { return };
         let Some((code, _)) = keysym(vk).and_then(|s| c.find(s)) else { return };
         c.fake(if down { KEY_PRESS_EVENT } else { KEY_RELEASE_EVENT }, code, 0, 0);
@@ -310,6 +341,14 @@ impl Input {
     pub fn text(&mut self, s: &str) {
         // With Ctrl/Alt/Super held, press the plain key so shortcuts like Ctrl+C work.
         let shortcut = self.held_keys.iter().any(|k| MODIFIERS.contains(k) && !matches!(k, 0x10 | 0xA0));
+        if let Some(w) = &self.wl {
+            for ch in s.chars() {
+                let sym = if shortcut && ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() as Keysym } else { char_keysym(ch) };
+                w.key(sym, true);
+                w.key(sym, false);
+            }
+            return;
+        }
         let Some(c) = &mut self.x else { return };
         for ch in s.chars() {
             if shortcut && ch.is_ascii_alphanumeric() {
@@ -342,11 +381,18 @@ impl Input {
 
 /// Moves the mouse to the middle of `m` if it's on another monitor.
 pub fn bring_onto(m: &Monitor) {
+    if super::wayland::active() {
+        return;
+    }
     Input::new().ensure_on(m);
 }
 
 /// Cursor position in screen pixels.
 pub fn cursor() -> Option<(i32, i32)> {
+    // On Wayland the pointer is drawn into the picture and its position isn't known.
+    if super::wayland::active() {
+        return None;
+    }
     thread_local! {
         static CONN: Option<X> = X::open();
     }

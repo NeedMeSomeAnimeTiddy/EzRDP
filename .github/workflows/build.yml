@@ -24,12 +24,11 @@ jobs:
 
   pc-server-linux:
     name: PC app (Linux)
-    # Older Ubuntu so the program also runs on older distributions.
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install libraries
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxkbcommon-dev libgl1-mesa-dev libx11-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxkbcommon-dev libgl1-mesa-dev libx11-dev libpipewire-0.3-dev clang
       - name: Test
         working-directory: server
         run: cargo test --release
