@@ -1,4 +1,4 @@
-//! Accepts phone connections and hands logged-in ones to a session.
+//! Accepts connections (phones, or the viewer on another PC) and hands logged-in ones to a session.
 
 use crate::login::{Login, Outcome, handshake};
 use crate::log;
@@ -81,11 +81,11 @@ pub fn listen(app: Arc<App>, approve: Approve, run: RunSession) -> std::io::Resu
                         *slot = stream.try_clone().ok().map(|s| (id, s));
                     }
                     let name = login.device_name.clone();
-                    log!("Phone connected: {name} ({peer})");
+                    log!("Connected: {name} ({peer})");
                     *app.connected.lock().unwrap() = Some(name.clone());
                     app.changed();
                     run(stream, *login, info(&app), app.clone());
-                    log!("Phone disconnected: {name}");
+                    log!("Disconnected: {name}");
                     let mut slot = ACTIVE.lock().unwrap();
                     if slot.as_ref().is_some_and(|(i, _)| *i == id) {
                         *slot = None;
@@ -95,7 +95,7 @@ pub fn listen(app: Arc<App>, approve: Approve, run: RunSession) -> std::io::Resu
                     app.changed();
                 }
                 Ok(Outcome::Paired(name)) => {
-                    log!("Now trusting phone: {name}");
+                    log!("Now trusting: {name}");
                     app.changed();
                 }
                 Ok(Outcome::Rejected(why)) => log!("Refused {peer}: {why}"),

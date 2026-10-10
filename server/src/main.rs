@@ -1,4 +1,5 @@
-//! EzRDP: lives in the tray on the PC; the EzRDP phone app connects to it.
+//! EzRDP: lives in the tray on the PC; the EzRDP phone app (or the EzRDP viewer on another PC)
+//! connects to it. On Linux it runs from a terminal or the desktop's autostart instead.
 #![cfg_attr(not(windows), allow(dead_code))]
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
@@ -37,6 +38,25 @@ mod session;
 #[cfg(windows)]
 mod tray;
 
+// Linux (X11): same session code, with Linux screen capture, input and sound.
+#[cfg(target_os = "linux")]
+#[path = "linux/audio.rs"]
+mod audio;
+#[cfg(target_os = "linux")]
+#[path = "linux/capture.rs"]
+mod capture;
+#[cfg(target_os = "linux")]
+#[path = "linux/hwenc.rs"]
+mod hwenc;
+#[cfg(target_os = "linux")]
+#[path = "linux/input.rs"]
+mod input;
+#[cfg(target_os = "linux")]
+#[path = "linux/overlay.rs"]
+mod overlay;
+#[cfg(target_os = "linux")]
+mod session;
+
 use state::App;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -52,8 +72,30 @@ struct Config {
     first_run_done: bool,
 }
 
+#[cfg(not(target_os = "linux"))]
 fn data_path(file: &str) -> PathBuf {
     std::env::current_exe().unwrap_or_default().with_file_name(file)
+}
+
+/// On Linux settings live in ~/.config/ezrdp (the program itself is often somewhere read-only).
+#[cfg(target_os = "linux")]
+fn data_path(file: &str) -> PathBuf {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join("ezrdp");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join(file)
+}
+
+fn computer_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "My PC".into())
 }
 
 fn load_config() -> Config {
@@ -90,7 +132,7 @@ fn load_config() -> Config {
         save_config(&cfg);
     }
     if cfg.name.is_empty() {
-        cfg.name = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "My PC".into());
+        cfg.name = computer_name();
     }
     cfg
 }
@@ -150,14 +192,10 @@ fn reach_internet(app: Arc<App>, internet: bool) -> String {
     }
 }
 
-/// Off Windows there's no screen to share; `ezrdp-server test-server` runs the network side
-/// (pairing auto-approves and prints the code) so the phone app's protocol can be tested.
+/// `ezrdp-server test-server` runs only the network side (pairing auto-approves and prints
+/// the code, nothing is captured) so the apps' protocol can be tested anywhere.
 #[cfg(not(windows))]
-fn main() {
-    if std::env::args().nth(1).as_deref() != Some("test-server") {
-        eprintln!("EzRDP only runs on Windows.");
-        return;
-    }
+fn test_server() {
     let cfg = load_config();
     let app = new_app(&cfg);
     std::thread::spawn({
@@ -180,6 +218,140 @@ fn main() {
     }
     println!("test server listening on {}", cfg.port);
     server::listen(app, approve, session).unwrap();
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn main() {
+    if std::env::args().nth(1).as_deref() == Some("test-server") {
+        test_server();
+    } else {
+        eprintln!("EzRDP can be controlled on Windows and Linux only.");
+    }
+}
+
+/// Asks the person at this PC whether to trust a new phone or PC: a desktop dialog if
+/// zenity or kdialog is installed, otherwise a question in the terminal.
+#[cfg(target_os = "linux")]
+fn approve_linux(name: &str, code: u32) -> bool {
+    use std::io::IsTerminal;
+    use std::process::{Command, Stdio};
+    let code = pairing::format_code(code);
+    let text = format!(
+        "A device wants to control this PC:\n\n    {name}\n\nCheck it shows this code:\n\n    {code}\n\n\
+         Only click Yes if it's yours and the codes match."
+    );
+    let quiet = |c: &mut Command| c.stdout(Stdio::null()).stderr(Stdio::null()).status();
+    if let Ok(s) = quiet(Command::new("zenity").args(["--question", "--title=EzRDP", "--width=360", "--default-cancel"]).arg(format!("--text={text}"))) {
+        return s.success();
+    }
+    if let Ok(s) = quiet(Command::new("kdialog").args(["--title", "EzRDP", "--yesno", &text])) {
+        return s.success();
+    }
+    if std::io::stdin().is_terminal() {
+        println!("\n{text}\nType y and press Enter to allow: ");
+        let mut answer = String::new();
+        let _ = std::io::stdin().read_line(&mut answer);
+        return answer.trim().eq_ignore_ascii_case("y") || answer.trim().eq_ignore_ascii_case("yes");
+    }
+    log!("Pairing request from {name} refused: install zenity, or run EzRDP in a terminal to answer it.");
+    false
+}
+
+/// Starts EzRDP when you sign in to the desktop (or stops doing that).
+#[cfg(target_os = "linux")]
+fn linux_autostart(on: bool) {
+    let dir = data_path("").parent().map(|p| p.join("autostart")).unwrap_or_default();
+    let file = dir.join("ezrdp.desktop");
+    if on {
+        let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
+        let _ = std::fs::create_dir_all(&dir);
+        let body = format!("[Desktop Entry]\nType=Application\nName=EzRDP\nComment=Lets your phone or another PC control this PC\nExec=\"{exe}\"\nX-GNOME-Autostart-enabled=true\n");
+        match std::fs::write(&file, body) {
+            Ok(()) => println!("EzRDP will start when you sign in ({}).", file.display()),
+            Err(e) => println!("Couldn't set that up: {e}"),
+        }
+    } else {
+        let _ = std::fs::remove_file(&file);
+        println!("EzRDP won't start by itself any more.");
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn main() {
+    use std::time::Duration;
+    let arg = std::env::args().nth(1).unwrap_or_default();
+    match arg.as_str() {
+        "test-server" => return test_server(),
+        "--autostart" => return linux_autostart(std::env::args().nth(2).as_deref() != Some("off")),
+        "--help" | "-h" => {
+            println!(
+                "EzRDP: lets your phone, or another PC running the EzRDP viewer, control this PC.\n\n\
+                 ezrdp-server                 run (keep it running; Ctrl+C stops it)\n\
+                 ezrdp-server --autostart     start EzRDP when you sign in\n\
+                 ezrdp-server --autostart off stop starting it when you sign in\n\n\
+                 Settings and trusted devices: {}",
+                data_path("").display()
+            );
+            return;
+        }
+        _ => {}
+    }
+    log::init(data_path("ezrdp.log"));
+    if capture::monitors().is_empty() {
+        let wayland = std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland");
+        eprintln!(
+            "EzRDP can't see the screen. {}",
+            if wayland {
+                "This desktop uses Wayland; EzRDP needs an X11 (Xorg) session. Pick \"... on Xorg\" on the sign-in screen."
+            } else {
+                "Start it from inside your desktop session (DISPLAY must be set)."
+            }
+        );
+        std::process::exit(1);
+    }
+
+    let cfg = load_config();
+    let app = new_app(&cfg);
+    {
+        let app = app.clone();
+        let internet = cfg.internet;
+        std::thread::spawn(move || {
+            log!("{}", reach_internet(app.clone(), internet));
+            loop {
+                std::thread::sleep(Duration::from_secs(30 * 60));
+                if let Some(ip) = stun::public_ip() {
+                    *app.public_ip.lock().unwrap() = Some(ip);
+                }
+            }
+        });
+    }
+    std::thread::spawn({
+        let app = app.clone();
+        move || discovery::run(app)
+    });
+
+    fn on_session(stream: std::net::TcpStream, l: login::Login, info: Vec<u8>, app: Arc<App>) {
+        if l.role == 1 {
+            log!("{} wanted to share its screen; showing a phone's screen only works on Windows for now.", l.device_name);
+            return;
+        }
+        session::run(stream, l, info, app);
+    }
+
+    let trusted = app.trusted.lock().unwrap().devices.len();
+    log!(
+        "EzRDP is running: {} (home address {}, port {}, {trusted} trusted devices).\n\
+         To add a phone or PC: on the same network, open EzRDP on it and pick this PC.\n\
+         Settings and trusted devices are in {}. Press Ctrl+C to stop.",
+        app.pc_name,
+        server::lan_ip().map(|i| i.to_string()).unwrap_or_else(|| "unknown".into()),
+        app.port,
+        data_path("").display()
+    );
+    if let Err(e) = server::listen(app, approve_linux, on_session) {
+        log!("EzRDP can't start: port {} is in use ({e}).", cfg.port);
+        std::process::exit(1);
+    }
 }
 
 /// Closes the copy of EzRDP that's already running and waits until it's gone.
@@ -255,7 +427,7 @@ fn main() {
         use windows::Win32::UI::HiDpi::*;
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
-    log::init();
+    log::init(data_path("ezrdp.log"));
 
     let cfg = load_config();
     // First run: start with Windows. Later runs: keep "start with Windows" pointing at this

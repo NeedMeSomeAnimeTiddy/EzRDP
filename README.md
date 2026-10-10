@@ -1,9 +1,11 @@
 # EzRDP
 
-Small, fast remote desktop: control your Windows PC from your Android phone.
+Small, fast remote desktop: control your Windows or Linux PC from your Android phone,
+or from another Windows or Linux PC.
 
-- **PC side:** one small `.exe` written in Rust. No install, no drivers.
+- **PC side:** one small program written in Rust (`EzRDP.exe` on Windows, `ezrdp-server` on Linux). No install, no drivers.
 - **Phone side:** a lightweight Android app.
+- **PC to PC:** the EzRDP viewer (`EzRDP-Viewer.exe` on Windows, `ezrdp-viewer` on Linux) controls another PC.
 - **Your monitors stay on.** EzRDP only *reads* the screen. It never changes display
   settings, never locks the PC and never turns screens off.
 
@@ -79,6 +81,50 @@ tap and type). Then Android asks to share the screen. A window showing the phone
 
 Stop from the phone's notification, or close the window on the PC.
 
+## PC to PC
+
+Control one PC from another. Any mix works: Windows → Windows, Windows → Linux, Linux → Windows, Linux → Linux.
+
+1. On the PC **you want to control**, run EzRDP: `EzRDP.exe` on Windows (see Setup below), or
+   `ezrdp-server` on Linux (see "Linux PC" below).
+2. On the PC **you sit at**, run the viewer: `EzRDP-Viewer.exe` on Windows, `ezrdp-viewer` on Linux.
+3. Both on the same home network: the other PC shows up under **Other PCs on this network**. Click **Pair**.
+   The other PC asks to allow it and shows a 6-digit code. Check it matches the viewer, then click **Yes**.
+   (Not showing up? Type its home address under **Pair by address**.)
+4. From then on click **Connect** next to it, at home or away (same rules as the phone, see below).
+
+In the viewer:
+
+| | |
+|---|---|
+| Mouse | Moves, clicks and scrolls on the other PC wherever you point at the picture |
+| Keyboard | Typing goes straight to the other PC, in any language. Shortcuts like Ctrl+C work |
+| **Keys** menu | Keys your own PC would grab: Windows key, Alt+Tab, Alt+F4, Task Manager, Lock, Print Screen. Also **Type the text copied on this computer** |
+| Screen list | Pick the other PC's monitor (shown when it has more than one) |
+| Quality, Sound | Same as on the phone |
+| **Full screen** | Fills your screen. Move the mouse to the top edge to get the bar back |
+
+If the connection drops, the viewer reconnects by itself for 30 seconds.
+
+### Linux PC (to be controlled)
+
+1. Download `ezrdp-server-linux`, make it runnable and start it from your desktop:
+   `chmod +x ezrdp-server-linux && ./ezrdp-server-linux`
+2. To start it every time you sign in: `./ezrdp-server-linux --autostart` (undo with `--autostart off`).
+3. If you use a firewall, let port 7270 in: `sudo ufw allow 7270`.
+
+Notes:
+- Needs an **X11 (Xorg)** desktop session. Wayland isn't supported yet: pick "… on Xorg" on the sign-in screen.
+- Pairing asks with a desktop dialog if `zenity` or `kdialog` is installed, otherwise in the terminal.
+- Sound needs `parec` (package `pulseaudio-utils`; works with PipeWire too).
+- Settings, trusted devices and the log are in `~/.config/ezrdp/`. Delete a line in `trusted.txt` to remove a device.
+- Stop it with Ctrl+C (or by ending the process).
+
+### Linux viewer
+
+`chmod +x ezrdp-viewer-linux && ./ezrdp-viewer-linux`. Works on X11 and Wayland desktops. Uses OpenGL, ALSA
+and `libxkbcommon-x11`, which normal desktops already have.
+
 ## Setup
 
 ### PC
@@ -127,6 +173,9 @@ home. People with a DDNS name can set it per PC: long-press the PC in the app �
 - One phone at a time. A new connection takes over from the old one.
 - Clicks and typing always go to the screen the phone is showing (the mouse is moved there first).
 - EzRDP runs as a tray app, not a Windows service: services can't see your screen.
+- Linux PC: X11 only (no Wayland yet), no graphics-card video encoding, no "being controlled" banner,
+  and it can't show a phone's screen. The screen saver can still lock the PC while it's being controlled.
+- The viewer shows your own mouse pointer; the other PC's pointer shape (text cursor, hand...) isn't shown.
 
 ## How it works (short)
 
@@ -137,9 +186,12 @@ home. People with a DDNS name can set it per PC: long-press the PC in the app �
 - Bitrate adapts: it drops when the network can't keep up and climbs back when it can.
 - Lag control: the PC only sends a new frame once the phone has confirmed the earlier ones, so delay can't pile up on slow connections.
 - Input: Windows `SendInput`. Sound: WASAPI loopback → raw 16-bit PCM.
+- Linux PC: X11 shared-memory screen capture, XTEST for mouse and keyboard, `parec` for sound, OpenH264 video.
+- Viewer: OpenH264 decoding, egui window, keyboard sent as typed text (so any layout works) plus real key presses for shortcuts.
 
 ## Building yourself
 
-- PC: install Rust, then `cd server && cargo build --release`
+- PC: install Rust, then `cd server && cargo build --release` (Windows or Linux)
+- Viewer: `cd viewer && cargo build --release` (on Linux, install `libasound2-dev` first)
 - Android: `cd android && ./gradlew assembleRelease` (needs the Android SDK). Builds are signed with
   `android/app/ezrdp.keystore` so every new APK installs as an update over the last one.

@@ -1,12 +1,11 @@
-//! Log to `ezrdp.log` next to the exe (the tray app has no console window).
+//! Log to `ezrdp.log` (the tray app has no console window).
 
 use std::io::Write;
 use std::sync::Mutex;
 
 pub static FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
 
-pub fn init() {
-    let path = std::env::current_exe().unwrap_or_default().with_file_name("ezrdp.log");
+pub fn init(path: std::path::PathBuf) {
     *FILE.lock().unwrap() = std::fs::File::create(path).ok();
 }
 
