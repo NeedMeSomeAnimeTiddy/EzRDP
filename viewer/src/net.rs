@@ -187,7 +187,7 @@ pub fn pair(
     host: &str,
     port: u16,
     cancel: &Mutex<Option<TcpStream>>,
-    on_code: impl FnOnce(String),
+    on_code: impl FnOnce(String, String),
 ) -> Result<SavedPc, ConnError> {
     let mut s = open(host, port, Duration::from_secs(4))?;
     *cancel.lock().unwrap() = s.try_clone().ok();
@@ -207,7 +207,7 @@ pub fn pair(
         return Err(io::Error::new(io::ErrorKind::InvalidData, "bad pairing reply").into());
     }
     write_plain(&mut s, C_PAIR_KEY, &ours.public)?;
-    on_code(pairing::format_code(pairing::code(&ours.public, &pc_pub)));
+    on_code(pairing::format_code(pairing::code(&ours.public, &pc_pub)), hello.name.clone());
     // Time for the person to walk over to the PC and click Yes.
     s.set_read_timeout(Some(Duration::from_secs(130)))?;
     let (kind, result) = read_msg(&mut s)?;

@@ -37,7 +37,8 @@ enum Screen {
     Home,
     Pairing {
         name: String,
-        code: Slot<String>,
+        /// The code to compare, and the PC's own name.
+        code: Slot<(String, String)>,
         result: Slot<Result<SavedPc, ConnError>>,
         cancel: Slot<TcpStream>,
     },
@@ -161,12 +162,12 @@ impl Viewer {
     }
 
     fn start_pairing(&self, host: String, port: u16, name: String, ctx: &egui::Context) -> Screen {
-        let (code, result, cancel): (Slot<String>, Slot<_>, Slot<TcpStream>) = Default::default();
+        let (code, result, cancel): (Slot<(String, String)>, Slot<_>, Slot<TcpStream>) = Default::default();
         {
             let (code, result, cancel, ctx) = (code.clone(), result.clone(), cancel.clone(), ctx.clone());
             std::thread::spawn(move || {
-                let r = net::pair(&host, port, &cancel, |c| {
-                    *code.lock().unwrap() = Some(c);
+                let r = net::pair(&host, port, &cancel, |c, name| {
+                    *code.lock().unwrap() = Some((c, name));
                     ctx.request_repaint();
                 });
                 *result.lock().unwrap() = Some(r);
@@ -352,13 +353,14 @@ impl Viewer {
         }
         let mut next = None;
         let code = code.lock().unwrap().clone();
+        let name = code.as_ref().map_or(name.clone(), |(_, n)| n.clone());
         egui::CentralPanel::default_margins().show(ui, |ui| {
             ui.add_space(40.0);
             ui.vertical_centered(|ui| {
                 ui.heading(format!("Pairing with {name}"));
                 ui.add_space(16.0);
                 match code {
-                    Some(code) => {
+                    Some((code, _)) => {
                         ui.label(format!("{name} now asks whether to allow this computer. Check it shows this code:"));
                         ui.add_space(8.0);
                         ui.label(RichText::new(code).size(40.0).strong().monospace());

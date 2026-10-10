@@ -506,7 +506,7 @@ fn main() {
             phone_view::run(stream, l, app);
             return;
         }
-        tray::notify("Phone connected", &format!("{} is now controlling this PC.", l.device_name));
+        tray::notify("Connected", &format!("{} is now controlling this PC.", l.device_name));
         session::run(stream, l, info, app);
     }
 
