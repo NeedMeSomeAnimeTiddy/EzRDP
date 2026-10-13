@@ -564,8 +564,15 @@ fn main() {
         let _ = viewer::run();
         return;
     }
+    // Started as administrator from the tray menu to turn "Control admin windows too" off.
+    if std::env::args().any(|a| a == "--admin-off") {
+        autostart::set_admin(false);
+        return;
+    }
+    // Started as administrator from the tray menu to turn it on: this copy then takes over.
+    let admin_on = std::env::args().any(|a| a == "--admin-on");
     // Started with Windows: just the tray, no window.
-    let background = std::env::args().any(|a| a == "--background");
+    let background = admin_on || std::env::args().any(|a| a == "--background");
 
     unsafe {
         let mutex = CreateMutexW(None, true, w!("Local\\EzRDP"));
@@ -597,9 +604,24 @@ fn main() {
     log::init(data_path("ezrdp.log"));
 
     let cfg = load_config();
-    // First run: start with Windows. Later runs: keep "start with Windows" pointing at this
-    // copy, in case it was moved or replaced.
-    if !cfg.first_run_done || autostart::enabled() {
+    if admin_on && input::elevated() {
+        if autostart::set_admin(true) {
+            log!("Control admin windows too: on");
+        } else {
+            log!("Control admin windows too: couldn't set up starting as administrator");
+        }
+    }
+    if autostart::refresh_admin() {
+        // Starts as administrator through the sign-in task: keep it pointing at this copy (in
+        // case it was moved or replaced), and no Run entry, which would start a normal copy.
+        if input::elevated() {
+            autostart::set_admin(true);
+        } else {
+            autostart::set(false);
+        }
+    } else if !cfg.first_run_done || autostart::enabled() {
+        // First run: start with Windows. Later runs: keep "start with Windows" pointing at this
+        // copy, in case it was moved or replaced.
         autostart::set(true);
     }
     let app = new_app(&cfg);

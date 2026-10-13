@@ -183,7 +183,8 @@ fn check_blocked(shared: &Shared, tx: &Sender) {
     let _ = tx.send(
         S_NOTICE,
         "A program running as administrator is in front on the PC, so Windows blocks the mouse and keyboard \
-         from EzRDP. To control admin programs, start EzRDP on the PC with right-click > Run as administrator."
+         from EzRDP. To fix this for good: on the PC, right-click the EzRDP icon near the clock and turn on \
+         \"Control admin windows too\"."
             .as_bytes(),
     );
 }

@@ -143,6 +143,10 @@ Notes:
    - **Pause / Resume connections**: while paused, no phone can connect and anyone connected is dropped.
    - **Trusted phones**: see and remove phones.
    - **Start with Windows**, **Connection info**, **Quit**.
+   - **Control admin windows too**: Windows blocks the mouse and keyboard from normal programs
+     while a program running as administrator is in front (Task Manager, installers). Turn this on
+     (Windows asks to allow it) and EzRDP runs, and starts with Windows, as administrator, so the
+     phone can use those too. The lock screen and "allow changes?" prompts still can't be controlled.
    - **Control another PC...**: opens the EzRDP window (it also opens when you start EzRDP yourself).
 
 ### Phone (one time, at home)

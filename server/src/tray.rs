@@ -21,6 +21,7 @@ const ID_QUIT: usize = 5;
 const ID_ADD_PHONE: usize = 6;
 const ID_FIREWALL: usize = 7;
 const ID_WINDOW: usize = 8;
+const ID_ADMIN: usize = 9;
 const ID_REMOVE_PHONE: usize = 100;
 
 static APP: OnceLock<Arc<App>> = OnceLock::new();
@@ -193,8 +194,15 @@ fn show_menu(app: &App) {
         let _ = AppendMenuW(phones, MF_STRING, ID_ADD_PHONE, w!("How to add a phone"));
         let _ = AppendMenuW(menu, MF_POPUP, phones.0 as usize, w!("Trusted phones"));
 
-        let auto = if crate::autostart::enabled() { MF_CHECKED } else { MF_UNCHECKED };
-        add(MF_STRING | auto, ID_AUTOSTART, "Start with Windows");
+        let admin = crate::autostart::admin();
+        if admin {
+            // Starting as administrator includes starting with Windows.
+            add(MF_STRING | MF_CHECKED | MF_GRAYED, ID_AUTOSTART, "Start with Windows");
+        } else {
+            let auto = if crate::autostart::enabled() { MF_CHECKED } else { MF_UNCHECKED };
+            add(MF_STRING | auto, ID_AUTOSTART, "Start with Windows");
+        }
+        add(MF_STRING | if admin { MF_CHECKED } else { MF_UNCHECKED }, ID_ADMIN, "Control admin windows too");
         add(MF_STRING, ID_INFO, "Connection info");
         if !FIREWALL_OK.load(Relaxed) {
             add(MF_STRING, ID_FIREWALL, "Allow through Windows Firewall...");
@@ -212,6 +220,35 @@ fn show_menu(app: &App) {
     }
 }
 
+/// "Control admin windows too": EzRDP runs (and starts with Windows) as administrator, so
+/// phones can use windows that run as administrator. Asks Windows for permission first.
+fn admin_windows(on: bool) {
+    if crate::input::elevated() {
+        if crate::autostart::set_admin(on) {
+            let text = if on {
+                "Phones can now control admin windows too."
+            } else {
+                "Off. EzRDP runs normally from the next time you sign in."
+            };
+            notify("Control admin windows too", text);
+        } else {
+            message("Couldn't change how EzRDP starts with Windows.", MB_OK | MB_ICONERROR);
+        }
+        return;
+    }
+    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
+    let args = if on { "--admin-on" } else { "--admin-off" };
+    // Shows the Windows "allow changes?" prompt. Turning on, the new copy (as administrator)
+    // replaces this one; turning off, it removes the sign-in task and exits.
+    let r = unsafe { ShellExecuteW(None, w!("runas"), &HSTRING::from(exe), &HSTRING::from(args), None, SW_HIDE) };
+    if r.0 as usize > 32 && !on {
+        std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            crate::autostart::refresh_admin();
+        });
+    }
+}
+
 fn handle(app: &App, cmd: usize, devices: &[crate::trust::Device]) {
     match cmd {
         ID_PAUSE => {
@@ -223,7 +260,8 @@ fn handle(app: &App, cmd: usize, devices: &[crate::trust::Device]) {
             app.changed();
         }
         ID_WINDOW => crate::open_window(),
-        ID_AUTOSTART => crate::autostart::set(!crate::autostart::enabled()),
+        ID_AUTOSTART if !crate::autostart::admin() => crate::autostart::set(!crate::autostart::enabled()),
+        ID_ADMIN => admin_windows(!crate::autostart::admin()),
         ID_INFO => {
             let home = crate::server::lan_ip().map(|i| i.to_string()).unwrap_or("unknown".into());
             let net = app.public_ip.lock().unwrap().map(|i| i.to_string()).unwrap_or("unknown".into());
