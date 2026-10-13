@@ -17,6 +17,8 @@ pub struct Monitor {
     pub w: i32,
     pub h: i32,
     pub primary: bool,
+    /// Wayland: the PipeWire stream of this screen (0 on X11).
+    pub stream: u32,
 }
 
 pub enum CapError {
@@ -53,13 +55,14 @@ fn list(conn: &RustConnection, root: Window) -> Vec<Monitor> {
                 w: m.width as i32,
                 h: m.height as i32,
                 primary: m.primary,
+                stream: 0,
             });
         }
     }
     if out.is_empty()
         && let Ok(g) = conn.get_geometry(root).map_err(err).and_then(|c| c.reply().map_err(err))
     {
-        out.push(Monitor { name: "Display 1".into(), x: 0, y: 0, w: g.width as i32, h: g.height as i32, primary: true });
+        out.push(Monitor { name: "Display 1".into(), x: 0, y: 0, w: g.width as i32, h: g.height as i32, primary: true, stream: 0 });
     }
     if !out.iter().any(|m| m.primary)
         && let Some(m) = out.first_mut()
@@ -70,6 +73,9 @@ fn list(conn: &RustConnection, root: Window) -> Vec<Monitor> {
 }
 
 pub fn monitors() -> Vec<Monitor> {
+    if super::wayland::active() {
+        return super::wayland::monitors();
+    }
     match connect() {
         Ok((conn, root)) => list(&conn, root),
         Err(_) => Vec::new(),
@@ -123,7 +129,7 @@ impl Drop for Shm {
     }
 }
 
-pub struct Source {
+pub struct XSource {
     monitor: Monitor,
     conn: RustConnection,
     root: Window,
@@ -139,11 +145,8 @@ pub struct Source {
 /// How often the screen is read (X11 has no "something changed" signal we can wait on cheaply).
 const GRAB_GAP: Duration = Duration::from_millis(16);
 
-impl Source {
+impl XSource {
     pub fn open(index: usize) -> Result<Self, String> {
-        if std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland") && std::env::var_os("DISPLAY").is_none() {
-            return Err("this is a Wayland session; EzRDP needs an X11 (Xorg) session on Linux".into());
-        }
         let (conn, root) = connect()?;
         let mons = list(&conn, root);
         let monitor = mons.get(index).or(mons.first()).cloned().ok_or("no screens found")?;
@@ -229,5 +232,34 @@ impl Source {
         let m = &self.monitor;
         yuv.convert(&self.cur, m.w as usize * 4, m.w as usize, m.h as usize, scale);
         Ok(true)
+    }
+}
+
+/// X11 or Wayland capture, whichever this desktop uses.
+pub enum Source {
+    X(XSource),
+    Wayland(super::wayland::Capture),
+}
+
+impl Source {
+    pub fn open(index: usize) -> Result<Self, String> {
+        if super::wayland::active() {
+            return super::wayland::Capture::open(index).map(Source::Wayland);
+        }
+        XSource::open(index).map(Source::X)
+    }
+
+    pub fn monitor(&self) -> &Monitor {
+        match self {
+            Source::X(s) => s.monitor(),
+            Source::Wayland(s) => s.monitor(),
+        }
+    }
+
+    pub fn frame(&mut self, timeout_ms: u32, yuv: &mut Yuv, scale: usize) -> Result<bool, CapError> {
+        match self {
+            Source::X(s) => s.frame(timeout_ms, yuv, scale),
+            Source::Wayland(s) => s.frame(timeout_ms, yuv, scale),
+        }
     }
 }

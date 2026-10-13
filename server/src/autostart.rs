@@ -26,7 +26,8 @@ pub fn set(on: bool) {
     unsafe {
         if on {
             let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();
-            let cmd = HSTRING::from(format!("\"{exe}\""));
+            // Started with Windows: the tray only, no window.
+            let cmd = HSTRING::from(format!("\"{exe}\" --background"));
             let bytes = std::slice::from_raw_parts(cmd.as_ptr() as *const u8, (cmd.len() + 1) * 2);
             let _ = RegSetValueExW(key, w!("EzRDP"), None, REG_SZ, Some(bytes));
         } else {

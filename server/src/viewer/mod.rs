@@ -1,16 +1,4 @@
-//! EzRDP viewer: control another PC (Windows or Linux) that runs EzRDP, from this PC.
-#![cfg_attr(windows, windows_subsystem = "windows")]
-#![allow(dead_code)]
-
-// The wire format, login and pairing are shared with the PC side.
-#[path = "../../server/src/crypto.rs"]
-mod crypto;
-#[path = "../../server/src/pairing.rs"]
-mod pairing;
-#[path = "../../server/src/protocol.rs"]
-mod protocol;
-#[path = "../../server/src/trust.rs"]
-mod trust;
+//! The EzRDP window: control another PC (Windows or Linux) that runs EzRDP, from this PC.
 
 mod audio;
 mod keys;
@@ -23,7 +11,7 @@ use eframe::egui::{
     TextureOptions, Vec2, ViewportCommand,
 };
 use net::{ConnError, Found, Session};
-use protocol::*;
+use crate::protocol::*;
 use std::net::{Shutdown, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -78,7 +66,8 @@ struct Viewer {
     confirm_forget: Option<String>,
 }
 
-fn main() -> eframe::Result {
+/// Opens the window; returns when it is closed.
+pub fn run() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("EzRDP")
@@ -91,7 +80,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             let found = Arc::new(Mutex::new(Vec::new()));
-            net::discover(found.clone(), cc.egui_ctx.clone());
+            net::discover(found.clone(), cc.egui_ctx.clone(), crate::own_pc_id());
             Ok(Box::new(Viewer {
                 store: Store::load(),
                 found,
@@ -325,8 +314,8 @@ impl Viewer {
                 ui.add_space(20.0);
                 ui.label(
                     RichText::new(
-                        "To control this PC from somewhere else, run EzRDP on it: EzRDP.exe on Windows, \
-                         ezrdp-server on Linux.",
+                        "While EzRDP runs on this PC, your phone or another PC can control it too \
+                         (pair them the same way).",
                     )
                     .weak(),
                 );

@@ -7,7 +7,7 @@ on:
 
 jobs:
   pc-server:
-    name: PC server (Windows)
+    name: PC app (Windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,57 +23,24 @@ jobs:
           path: server/target/release/ezrdp-server.exe
 
   pc-server-linux:
-    name: PC server (Linux)
-    # Older Ubuntu so the program also runs on older distributions.
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Test
-        working-directory: server
-        run: cargo test --release
-      - name: Build
-        working-directory: server
-        run: cargo build --release
-      - uses: actions/upload-artifact@v4
-        with:
-          name: EzRDP-PC-Linux
-          path: server/target/release/ezrdp-server
-
-  viewer-windows:
-    name: Viewer (Windows)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Test
-        working-directory: viewer
-        run: cargo test --release
-      - name: Build
-        working-directory: viewer
-        run: |
-          cargo build --release
-          copy target\release\ezrdp-viewer.exe EzRDP-Viewer.exe
-      - uses: actions/upload-artifact@v4
-        with:
-          name: EzRDP-Viewer-Windows
-          path: viewer/EzRDP-Viewer.exe
-
-  viewer-linux:
-    name: Viewer (Linux)
-    runs-on: ubuntu-22.04
+    name: PC app (Linux)
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install libraries
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxkbcommon-dev libgl1-mesa-dev libx11-dev
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libxkbcommon-dev libgl1-mesa-dev libx11-dev libpipewire-0.3-dev clang
       - name: Test
-        working-directory: viewer
+        working-directory: server
         run: cargo test --release
       - name: Build
-        working-directory: viewer
-        run: cargo build --release
+        working-directory: server
+        run: |
+          cargo build --release
+          cp target/release/ezrdp-server ezrdp-linux
       - uses: actions/upload-artifact@v4
         with:
-          name: EzRDP-Viewer-Linux
-          path: viewer/target/release/ezrdp-viewer
+          name: EzRDP-PC-Linux
+          path: server/ezrdp-linux
 
   android-app:
     name: Android app
@@ -98,7 +65,7 @@ jobs:
   release:
     name: Publish download
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [pc-server, pc-server-linux, viewer-windows, viewer-linux, android-app]
+    needs: [pc-server, pc-server-linux, android-app]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -109,5 +76,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: >
           gh release create "${{ github.ref_name }}" --repo "${{ github.repository }}" --title "EzRDP ${{ github.ref_name }}"
-          EzRDP-PC/ezrdp-server.exe EzRDP-Android/EzRDP.apk EzRDP-Viewer-Windows/EzRDP-Viewer.exe
-          EzRDP-PC-Linux/ezrdp-server#ezrdp-server-linux EzRDP-Viewer-Linux/ezrdp-viewer#ezrdp-viewer-linux
+          EzRDP-PC/ezrdp-server.exe EzRDP-Android/EzRDP.apk EzRDP-PC-Linux/ezrdp-linux

@@ -37,7 +37,11 @@ fn capture(shared: &Shared, tx: &Sender) -> std::io::Result<()> {
     // 10 ms of sound per message.
     let mut buf = vec![0u8; RATE as usize / 100 * 4];
     while result.is_ok() && shared.audio_on.load(Relaxed) && !shared.stopped() {
-        result = out.read_exact(&mut buf).and_then(|_| tx.send(S_AUDIO, &buf));
+        result = out.read_exact(&mut buf);
+        // Playing another PC's sound here? Don't send it back (it would echo forever).
+        if result.is_ok() && !crate::echo::remote_sound_playing() {
+            result = tx.send(S_AUDIO, &buf);
+        }
     }
     let _ = child.kill();
     let _ = child.wait();
