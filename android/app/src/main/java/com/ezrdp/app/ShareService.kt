@@ -115,8 +115,15 @@ class ShareService : Service(), ConnectionListener {
                 val c = Connection(addr, port, pc.id.fromHex(), pc.deviceId, pc.key, LoginOptions(role = Msg.ROLE_SHARE_PHONE), this, timeout)
                 try {
                     c.open()
-                    conn = c
-                    ui.post { startVideo() }
+                    ui.post {
+                        // Stopped while connecting: hang up instead of leaving the PC waiting.
+                        if (!running) {
+                            c.close()
+                            return@post
+                        }
+                        conn = c
+                        startVideo()
+                    }
                     return@Thread
                 } catch (e: Exception) {
                     c.close()

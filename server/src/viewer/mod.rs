@@ -563,6 +563,26 @@ impl Viewer {
             });
         }
 
+        // A message from the PC (like "an admin window is blocking the mouse"), shown for a while.
+        let notice = {
+            let mut s = live.session.state.lock().unwrap();
+            if s.notice.as_ref().is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(20)) {
+                s.notice = None;
+            }
+            s.notice.as_ref().map(|(t, _)| t.clone())
+        };
+        if let Some(text) = notice {
+            egui::Panel::bottom("notice").show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(text).color(Color32::from_rgb(255, 200, 80)));
+                    if ui.button("OK").clicked() {
+                        live.session.state.lock().unwrap().notice = None;
+                    }
+                });
+            });
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
+
         egui::CentralPanel::no_frame().frame(egui::Frame::NONE.fill(Color32::BLACK)).show(ui, |ui| {
             let area = ui.available_rect_before_wrap();
             match &live.texture {

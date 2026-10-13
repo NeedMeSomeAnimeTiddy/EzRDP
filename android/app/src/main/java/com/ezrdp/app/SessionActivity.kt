@@ -17,7 +17,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.os.Build
 
-class SessionActivity : Activity(), ConnectionListener {
+class SessionActivity : Activity() {
     companion object {
         /** Biggest picture this phone can decode; looked up once. */
         val decoderLimit: Pair<Int, Int> by lazy { VideoDecoder.maxSize() }
@@ -25,6 +25,13 @@ class SessionActivity : Activity(), ConnectionListener {
 
     private val ui = Handler(Looper.getMainLooper())
     @Volatile private var conn: Connection? = null
+    /** The connection being opened right now (not yet [conn]). */
+    @Volatile private var opening: Connection? = null
+    /** Bumped on every connect and on leaving: anything from an older attempt is ignored. */
+    private var generation = 0
+    /** The current connection's first picture has shown. */
+    private var pictureShown = false
+    private var notice: AlertDialog? = null
     private lateinit var remote: RemoteView
     private lateinit var keyInput: KeyInput
     private lateinit var status: TextView
@@ -40,8 +47,13 @@ class SessionActivity : Activity(), ConnectionListener {
     private val modifierButtons = HashMap<Int, TextView>()
     private val heldModifiers = HashSet<Int>()
 
-    private val decoder = VideoDecoder { conn?.requestKeyframe() }.also { d ->
-        d.onPicture = { ui.post { if (conn != null) showStatus(null) } }
+    private val decoder = VideoDecoder { (conn ?: opening)?.requestKeyframe() }.also { d ->
+        d.onPicture = {
+            ui.post {
+                pictureShown = true
+                if (conn != null) showStatus(null)
+            }
+        }
         d.onStuck = { ui.post { pictureStuck() } }
     }
     private val audio = AudioPlayer()
@@ -418,7 +430,6 @@ class SessionActivity : Activity(), ConnectionListener {
             gpuEncoder = settings.gpuEncoder
             conn?.close()
             conn = null
-            decoder.release()
             if (running) connect()
         }
     }
@@ -426,10 +437,20 @@ class SessionActivity : Activity(), ConnectionListener {
     override fun onStop() {
         super.onStop()
         running = false
+        generation++
         ui.removeCallbacksAndMessages(null)
+        opening?.close()
+        opening = null
         conn?.close()
         conn = null
+        forgetModifiers()
         audio.release()
+    }
+
+    /** The PC lets go of held keys when a connection ends; make the buttons match. */
+    private fun forgetModifiers() {
+        heldModifiers.clear()
+        modifierButtons.values.forEach { it.setActive(false) }
     }
 
     override fun onDestroy() {
@@ -469,37 +490,54 @@ class SessionActivity : Activity(), ConnectionListener {
 
     private fun connect() {
         showStatus(if (attempt == 0) "Connecting to ${pc.name}…" else "Reconnecting…")
+        // Only ever one attempt at a time: a newer one makes older ones give up.
+        val gen = ++generation
+        opening?.close()
+        opening = null
+        // Fresh decoder before the connection starts sending, so its first picture isn't lost.
+        decoder.release()
+        pictureShown = false
         Thread {
             var lastError: Exception? = null
             val (maxW, maxH) = decoderLimit
             val options = LoginOptions(quality, Msg.ROLE_CONTROL_PC, maxW, maxH, gpuEncoder)
             for ((addr, timeout) in pc.addresses(liveHost)) {
-                if (!running) return@Thread
-                val c = Connection(addr, port, pc.id.fromHex(), pc.deviceId, pc.key, options, this, timeout)
+                if (!running || gen != generation) return@Thread
+                val events = Events()
+                val c = Connection(addr, port, pc.id.fromHex(), pc.deviceId, pc.key, options, events, timeout)
+                events.c = c
+                opening = c
                 try {
                     c.open()
                     ui.post {
-                        if (!running) {
+                        if (opening === c) opening = null
+                        if (!running || gen != generation || conn != null) {
                             c.close()
+                            return@post
+                        }
+                        if (c.closed) {
+                            // It dropped before we could start using it.
+                            retry()
                             return@post
                         }
                         conn = c
                         attempt = 0
                         everConnected = true
-                        // Fresh decoder, so "waiting" goes away when this connection's first picture shows.
-                        decoder.release()
-                        showStatus("Waiting for picture…")
+                        forgetModifiers()
+                        showStatus(if (pictureShown) null else "Waiting for picture…")
                         if (soundOn) c.setAudio(true)
                         chosenMonitor?.let { c.selectMonitor(it) }
                     }
                     return@Thread
                 } catch (e: Exception) {
                     c.close()
+                    if (opening === c) opening = null
                     lastError = e
                     if (e is NotTrustedException || e is VersionException || e is PausedException) break
                 }
             }
             ui.post {
+                if (gen != generation) return@post
                 when (lastError) {
                     is NotTrustedException -> {
                         store.remove(pc.id)
@@ -527,7 +565,8 @@ class SessionActivity : Activity(), ConnectionListener {
             return
         }
         showStatus("Can't reach ${pc.name}, retrying…")
-        ui.postDelayed({ if (running) connect() }, 1500)
+        val gen = generation
+        ui.postDelayed({ if (running && gen == generation) connect() }, 1500)
     }
 
     private fun fail(msg: String) {
@@ -536,13 +575,44 @@ class SessionActivity : Activity(), ConnectionListener {
         showStatus("Couldn't connect\n\n$msg", "OK")
     }
 
-    // ---------- ConnectionListener (network thread) ----------
+    // ---------- Connection events (network thread) ----------
 
-    override fun onMonitors(list: List<MonitorInfo>) {
+    /** One connection's events. Ones from a connection that is no longer in use are ignored,
+     *  so an old connection ending can't cut off the new one (picture showing, taps going nowhere). */
+    private inner class Events : ConnectionListener {
+        lateinit var c: Connection
+        private fun live() = c === conn || c === opening
+
+        override fun onMonitors(list: List<MonitorInfo>) { if (live()) this@SessionActivity.onMonitors(list) }
+        override fun onVideoConfig(monitor: Int, width: Int, height: Int) {
+            if (live()) this@SessionActivity.onVideoConfig(monitor, width, height)
+        }
+        override fun onVideoFrame(data: ByteArray, offset: Int, length: Int, keyframe: Boolean) {
+            if (live()) this@SessionActivity.onVideoFrame(data, offset, length, keyframe)
+        }
+        override fun onCursor(x: Float, y: Float, visible: Boolean) { if (live()) this@SessionActivity.onCursor(x, y, visible) }
+        override fun onAudioConfig(sampleRate: Int, channels: Int) {
+            if (live()) this@SessionActivity.onAudioConfig(sampleRate, channels)
+        }
+        override fun onAudio(data: ByteArray, offset: Int, length: Int) {
+            if (live()) this@SessionActivity.onAudio(data, offset, length)
+        }
+        override fun onAddresses(home: String, internet: String, port: Int) {
+            if (live()) this@SessionActivity.onAddresses(home, internet, port)
+        }
+        override fun onNotice(text: String) { if (live()) this@SessionActivity.onNotice(text) }
+        override fun onBye(reason: Int) { ui.post { if (c === conn) this@SessionActivity.onBye(reason) } }
+        override fun onDisconnected(error: Exception?) {
+            if (error == null) return // we hung up on purpose
+            ui.post { if (c === conn) this@SessionActivity.onDisconnected() }
+        }
+    }
+
+    private fun onMonitors(list: List<MonitorInfo>) {
         ui.post { monitors = list }
     }
 
-    override fun onVideoConfig(monitor: Int, width: Int, height: Int) {
+    private fun onVideoConfig(monitor: Int, width: Int, height: Int) {
         decoder.configure(width, height)
         ui.post {
             val newScreen = monitor != currentMonitor
@@ -551,23 +621,23 @@ class SessionActivity : Activity(), ConnectionListener {
         }
     }
 
-    override fun onVideoFrame(data: ByteArray, offset: Int, length: Int, keyframe: Boolean) {
+    private fun onVideoFrame(data: ByteArray, offset: Int, length: Int, keyframe: Boolean) {
         decoder.decode(data, offset, length, keyframe)
     }
 
-    override fun onCursor(x: Float, y: Float, visible: Boolean) {
+    private fun onCursor(x: Float, y: Float, visible: Boolean) {
         ui.post { remote.setRemoteCursor(x, y, visible) }
     }
 
-    override fun onAudioConfig(sampleRate: Int, channels: Int) {
+    private fun onAudioConfig(sampleRate: Int, channels: Int) {
         if (soundOn) audio.configure(sampleRate, channels)
     }
 
-    override fun onAudio(data: ByteArray, offset: Int, length: Int) {
+    private fun onAudio(data: ByteArray, offset: Int, length: Int) {
         if (soundOn) audio.write(data, offset, length)
     }
 
-    override fun onAddresses(home: String, internet: String, port: Int) {
+    private fun onAddresses(home: String, internet: String, port: Int) {
         ui.post {
             if (home.isNotEmpty()) pc.home = home
             if (internet.isNotEmpty()) pc.internet = internet
@@ -576,32 +646,34 @@ class SessionActivity : Activity(), ConnectionListener {
         }
     }
 
-    override fun onBye(reason: Int) {
+    private fun onBye(reason: Int) {
+        running = false
+        conn?.close()
+        conn = null
+        forgetModifiers()
+        controls.release()
+        showStatus(
+            when (reason) {
+                Msg.BYE_PAUSED -> "Connections were paused on ${pc.name}."
+                Msg.BYE_REMOVED -> "${pc.name} no longer trusts this phone."
+                else -> "${pc.name} ended the session."
+            },
+            "OK",
+        )
+    }
+
+    private fun onNotice(text: String) {
         ui.post {
-            running = false
-            conn?.close()
-            conn = null
-            controls.release()
-            showStatus(
-                when (reason) {
-                    Msg.BYE_PAUSED -> "Connections were paused on ${pc.name}."
-                    Msg.BYE_REMOVED -> "${pc.name} no longer trusts this phone."
-                    else -> "${pc.name} ended the session."
-                },
-                "OK",
-            )
+            if (isFinishing || notice?.isShowing == true) return@post
+            notice = AlertDialog.Builder(this).setMessage(text).setPositiveButton("OK", null).show()
         }
     }
 
-    override fun onDisconnected(error: Exception?) {
-        if (error == null) return // we hung up on purpose
-        ui.post {
-            if (conn == null) return@post
-            conn = null
-            heldModifiers.clear()
-            modifierButtons.values.forEach { it.setActive(false) }
-            controls.release()
-            if (running) retry()
-        }
+    private fun onDisconnected() {
+        conn?.close()
+        conn = null
+        forgetModifiers()
+        controls.release()
+        if (running) retry()
     }
 }

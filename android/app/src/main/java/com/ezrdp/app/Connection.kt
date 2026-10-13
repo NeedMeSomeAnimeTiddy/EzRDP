@@ -29,6 +29,8 @@ object Msg {
     const val S_PAIR_KEY = 0x0B
     const val S_PAIR_RESULT = 0x0C
     const val S_BYE = 0x0D
+    /** Text to show the person (e.g. why the mouse isn't working). */
+    const val S_NOTICE = 0x0E
 
     const val BYE_ENDED = 0
     const val BYE_PAUSED = 1
@@ -172,6 +174,8 @@ interface ConnectionListener {
     fun onDisconnected(error: Exception?)
     /** The PC ended the session on purpose (BYE_*): don't reconnect. */
     fun onBye(reason: Int) {}
+    /** Something the PC wants the person to know. */
+    fun onNotice(text: String) {}
 
     // While sharing this phone's screen, the PC sends these.
     /** action 0 = finger down, 1 = move, 2 = up; x/y are 0..1 of the phone screen. */
@@ -214,7 +218,9 @@ class Connection(
 
     private val socket = Socket()
     private val queue = LinkedBlockingQueue<ByteArray>()
-    @Volatile private var closed = false
+    /** The connection has ended (either side). */
+    @Volatile var closed = false
+        private set
     @Volatile private var userClosed = false
 
     /** Connects and logs in. Blocking: call from a background thread. */
@@ -346,6 +352,7 @@ class Connection(
                 listener.onAddresses(home, net, b.short.toInt() and 0xffff)
             }
             Msg.S_BYE -> listener.onBye(b.get().toInt())
+            Msg.S_NOTICE -> listener.onNotice(String(msg, 1, msg.size - 1, Charsets.UTF_8))
             Msg.S_TOUCH -> {
                 val action = b.get().toInt()
                 listener.onTouch(action, b.float, b.float)

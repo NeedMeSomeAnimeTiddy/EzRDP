@@ -277,6 +277,7 @@ class MainActivity : Activity() {
             try {
                 val r = Pairing.pair(host, port, phoneName(), { socket = it }) { code ->
                     ui.post {
+                        if (isDestroyed) return@post
                         dialog.setMessage(
                             "Your PC is asking whether to trust this phone.\n\n" +
                                 "Check it shows this code, then click Yes on the PC:\n\n$code",
@@ -286,6 +287,8 @@ class MainActivity : Activity() {
                 val pc = SavedPc(r.pcId.toHex(), r.pcName, r.deviceId, r.key, home = host, port = port)
                 store.save(pc)
                 ui.post {
+                    // The screen may have been rebuilt (rotated) meanwhile: the PC is saved either way.
+                    if (isDestroyed) return@post
                     dialog.dismiss()
                     Toast.makeText(this, "${r.pcName} added", Toast.LENGTH_SHORT).show()
                     render()
@@ -293,6 +296,7 @@ class MainActivity : Activity() {
                 }
             } catch (e: Exception) {
                 ui.post {
+                    if (isDestroyed) return@post
                     dialog.dismiss()
                     if (!cancelled) showPairError(e, host)
                 }

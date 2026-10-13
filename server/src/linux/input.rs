@@ -402,6 +402,11 @@ pub fn cursor() -> Option<(i32, i32)> {
 /// Not needed on Linux: reading the screen doesn't depend on the monitors being awake.
 pub fn wake_displays() {}
 
+/// Windows only: an admin window blocking EzRDP's input.
+pub fn admin_window_in_front() -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

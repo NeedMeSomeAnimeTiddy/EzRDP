@@ -570,8 +570,10 @@ fn main() {
     unsafe {
         let mutex = CreateMutexW(None, true, w!("Local\\EzRDP"));
         if GetLastError() == ERROR_ALREADY_EXISTS {
-            // This same program is already in the tray: just open the window.
-            if running_is_this_program() {
+            // This same program is already in the tray: just open the window. Unless this copy was
+            // started as administrator: then it replaces the normal one, so admin windows can be
+            // controlled too.
+            if running_is_this_program() && !input::elevated() {
                 if !background {
                     open_window();
                 }

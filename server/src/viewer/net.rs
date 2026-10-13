@@ -255,6 +255,8 @@ pub struct State {
     pub ended: Option<(Option<u8>, String)>,
     /// New addresses to remember: home, internet, port.
     pub addresses: Option<(String, String, u16)>,
+    /// Something the PC wants the person to know, and when it arrived.
+    pub notice: Option<(String, std::time::Instant)>,
 }
 
 pub struct Session {
@@ -360,6 +362,10 @@ impl Session {
                             }
                         }
                         S_BYE => bye = p.u8(),
+                        S_NOTICE => {
+                            let text = String::from_utf8_lossy(&body).into_owned();
+                            state.lock().unwrap().notice = Some((text, std::time::Instant::now()));
+                        }
                         _ => {} // S_PING, S_CURSOR (the pointer is drawn by this computer)
                     }
                     if !matches!(kind, S_PING | S_AUDIO | S_CURSOR | S_VIDEO_FRAME) {

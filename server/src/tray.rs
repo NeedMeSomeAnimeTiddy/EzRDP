@@ -326,7 +326,12 @@ unsafe extern "system" fn key_hook(code: i32, wparam: WPARAM, lparam: LPARAM) ->
         if !injected {
             match k.vkCode {
                 0x11 | 0xA2 | 0xA3 => REAL_CTRL.store(down, Relaxed), // Ctrl, left/right Ctrl
-                0x1B if down && REAL_CTRL.load(Relaxed) && crate::session::active() => {
+                // Also ask Windows: a Ctrl let go on the lock screen never reaches this hook.
+                0x1B if down
+                    && REAL_CTRL.load(Relaxed)
+                    && unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x11) } < 0
+                    && crate::session::active() =>
+                {
                     crate::session::end(crate::protocol::BYE_ENDED);
                     return LRESULT(1); // swallow it, so the Start menu doesn't open
                 }
@@ -367,6 +372,11 @@ pub fn run(app: Arc<App>) {
         };
         WINDOW.store(window.0 as isize, Relaxed);
         let _ = TASKBAR_CREATED.set(RegisterWindowMessageW(w!("TaskbarCreated")));
+        // When running as administrator, Windows drops messages from normal programs unless
+        // allowed: Explorer's tray clicks and restarts, and a newer EzRDP asking this one to quit.
+        for m in [WM_TRAY, WM_CLOSE, *TASKBAR_CREATED.get().unwrap()] {
+            let _ = ChangeWindowMessageFilterEx(window, m, MSGFLT_ALLOW, None);
+        }
         let _ = ICONS.set((make_icon(0xFF4F8CFF).0 as isize, make_icon(0xFF8A8F98).0 as isize));
         add_icon(&app);
         // Ctrl+Esc on the PC's own keyboard ends the phone's session.

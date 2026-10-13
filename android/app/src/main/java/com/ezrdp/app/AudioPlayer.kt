@@ -7,10 +7,13 @@ import android.media.AudioTrack
 /** Plays the PC's sound. Never waits: if audio falls behind, extra data is dropped to stay in sync. */
 class AudioPlayer {
     private var track: AudioTrack? = null
+    /** Last format the PC sent, so sound can start again after being switched off and on. */
+    private var format: Pair<Int, Int>? = null
 
     @Synchronized
     fun configure(sampleRate: Int, channels: Int) {
         release()
+        format = sampleRate to channels
         val mask = if (channels == 1) AudioFormat.CHANNEL_OUT_MONO else AudioFormat.CHANNEL_OUT_STEREO
         val min = AudioTrack.getMinBufferSize(sampleRate, mask, AudioFormat.ENCODING_PCM_16BIT)
         // About 80 ms of room: enough to ride out network jitter, small enough to stay in sync.
@@ -38,6 +41,7 @@ class AudioPlayer {
 
     @Synchronized
     fun write(data: ByteArray, offset: Int, length: Int) {
+        if (track == null) format?.let { (rate, ch) -> configure(rate, ch) }
         val t = track ?: return
         t.write(data, offset, length, AudioTrack.WRITE_NON_BLOCKING)
     }

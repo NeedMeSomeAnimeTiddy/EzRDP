@@ -26,6 +26,8 @@ pub const S_PAIR_KEY: u8 = 0x0B; // PC public key [65]
 pub const S_PAIR_RESULT: u8 = 0x0C; // RESULT_* u8, then device id [16] if ok
 pub const S_BYE: u8 = 0x0D; // BYE_* u8: the PC ended the session on purpose (don't reconnect)
 
+pub const S_NOTICE: u8 = 0x0E; // utf8 text to show the person on the phone (e.g. why input isn't working)
+
 pub const BYE_ENDED: u8 = 0; // someone at the PC clicked disconnect
 pub const BYE_PAUSED: u8 = 1; // connections were paused
 pub const BYE_REMOVED: u8 = 2; // this phone is no longer trusted

@@ -4,7 +4,7 @@ use crate::capture::{CapError, Monitor, Source, monitors};
 use crate::convert::{Yuv, out_size};
 use crate::encoder::{H264, Quality, quality, scale_for};
 use crate::hwenc::HwEncoder;
-use crate::input::{Input, cursor, wake_displays};
+use crate::input::{Input, admin_window_in_front, cursor, wake_displays};
 use crate::protocol::*;
 use crate::login::Login;
 use std::net::{Shutdown, TcpStream};
@@ -32,6 +32,8 @@ pub struct Shared {
     max_size: (usize, usize),
     hw_encoder: AtomicBool,
     phone_name: String,
+    /// When the phone was last told an admin window is blocking input.
+    admin_notice: Mutex<Option<Instant>>,
 }
 
 impl Shared {
@@ -148,6 +150,7 @@ fn new_shared(login: &Login) -> Arc<Shared> {
         max_size: (login.max_w as usize, login.max_h as usize),
         hw_encoder: AtomicBool::new(login.hw_encoder),
         phone_name: login.device_name.clone(),
+        admin_notice: Mutex::new(None),
     })
 }
 
@@ -165,7 +168,30 @@ fn send_monitors(tx: &Sender, mons: &[Monitor]) -> std::io::Result<()> {
     tx.send(S_MONITORS, &p)
 }
 
+/// The phone pressed something: if Windows is throwing it away because an admin window is in
+/// front, say so (now and then), instead of leaving the person tapping at a screen that ignores them.
+fn check_blocked(shared: &Shared, tx: &Sender) {
+    if !admin_window_in_front() {
+        return;
+    }
+    let mut last = shared.admin_notice.lock().unwrap();
+    if last.is_some_and(|t| t.elapsed() < Duration::from_secs(15)) {
+        return;
+    }
+    *last = Some(Instant::now());
+    crate::log!("Input blocked: a program running as administrator is in front");
+    let _ = tx.send(
+        S_NOTICE,
+        "A program running as administrator is in front on the PC, so Windows blocks the mouse and keyboard \
+         from EzRDP. To control admin programs, start EzRDP on the PC with right-click > Run as administrator."
+            .as_bytes(),
+    );
+}
+
 fn handle(kind: u8, body: &[u8], shared: &Shared, input: &mut Input, tx: &Sender) {
+    if matches!(kind, C_MOUSE_BUTTON | C_SCROLL | C_TEXT | C_KEY) {
+        check_blocked(shared, tx);
+    }
     let mut p = Payload(body);
     let mon = || shared.current.lock().unwrap().clone();
     match kind {

@@ -211,6 +211,62 @@ pub fn cursor() -> Option<(i32, i32)> {
     Some((ci.ptScreenPos.x, ci.ptScreenPos.y))
 }
 
+/// Whether this copy of EzRDP is running as administrator.
+pub fn elevated() -> bool {
+    use std::sync::OnceLock;
+    static ELEVATED: OnceLock<bool> = OnceLock::new();
+    *ELEVATED.get_or_init(|| unsafe { process_elevated(windows::Win32::System::Threading::GetCurrentProcess()) == Some(true) })
+}
+
+/// `Some(true)` if the process runs as administrator, `None` if we aren't allowed to look.
+unsafe fn process_elevated(process: windows::Win32::Foundation::HANDLE) -> Option<bool> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Security::*;
+    use windows::Win32::System::Threading::OpenProcessToken;
+    unsafe {
+        let mut token = Default::default();
+        OpenProcessToken(process, TOKEN_QUERY, &mut token).ok()?;
+        let mut e = TOKEN_ELEVATION::default();
+        let mut len = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut e as *mut _ as *mut _),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut len,
+        )
+        .is_ok();
+        let _ = CloseHandle(token);
+        ok.then_some(e.TokenIsElevated != 0)
+    }
+}
+
+/// The window in front belongs to a program running as administrator, and this copy isn't.
+/// Windows then silently throws away every click and key EzRDP sends.
+pub fn admin_window_in_front() -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::*;
+    if elevated() {
+        return false;
+    }
+    unsafe {
+        let win = GetForegroundWindow();
+        if win.is_invalid() {
+            return false;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(win, Some(&mut pid));
+        if pid == 0 || pid == std::process::id() {
+            return false;
+        }
+        let Ok(p) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
+        // Not allowed to look at its token: it runs with more rights than us.
+        let admin = process_elevated(p).unwrap_or(true);
+        let _ = CloseHandle(p);
+        admin
+    }
+}
+
 /// A tiny mouse nudge wakes monitors that went to sleep, so the phone isn't stuck on a black screen.
 pub fn wake_displays() {
     send(&[mouse(MOUSEEVENTF_MOVE, 0, 0, 0)]);
