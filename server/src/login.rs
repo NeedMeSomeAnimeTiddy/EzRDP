@@ -4,10 +4,36 @@ use crate::crypto::{self, Seal};
 use crate::pairing::{self, KeyPair};
 use crate::protocol::*;
 use crate::state::App;
-use std::io;
+use std::io::{self, Read};
 use std::net::{IpAddr, TcpStream};
 use std::sync::atomic::Ordering::Relaxed;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// How long a connection gets to say who it is, however slowly it trickles in.
+const HELLO_DEADLINE: Duration = Duration::from_secs(20);
+/// How long the "Allow this device?" question waits for an answer.
+const APPROVE_WAIT: Duration = Duration::from_secs(120);
+
+/// Reads from the socket, but gives up once the deadline has passed.
+struct Deadline<'a>(&'a TcpStream, Instant);
+
+impl Read for Deadline<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self.1.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "too slow to log in"));
+        }
+        self.0.set_read_timeout(Some(left))?;
+        (&mut &*self.0).read(buf)
+    }
+}
+
+/// A device name safe to show in a dialog: one short line.
+fn clean_name(raw: &[u8]) -> String {
+    let name: String = String::from_utf8_lossy(raw).chars().filter(|c| !c.is_control()).take(40).collect();
+    let name = name.trim();
+    if name.is_empty() { "Phone".into() } else { name.to_string() }
+}
 
 pub struct Login {
     pub quality: u8,
@@ -21,6 +47,7 @@ pub struct Login {
     pub tx: Seal,
     pub rx: Seal,
     pub device_name: String,
+    pub device_id: [u8; 16],
 }
 
 pub enum Outcome {
@@ -47,7 +74,7 @@ pub fn is_local(ip: IpAddr) -> bool {
 }
 
 /// `approve(phone name, code)` asks the person at the PC whether to trust a new phone.
-pub fn handshake(stream: &mut TcpStream, app: &App, approve: &dyn Fn(&str, u32) -> bool) -> io::Result<Outcome> {
+pub fn handshake(stream: &mut TcpStream, app: &App, approve: fn(&str, u32) -> bool) -> io::Result<Outcome> {
     let mut ns = [0u8; 16];
     getrandom::fill(&mut ns).map_err(io::Error::other)?;
     let mut hello = vec![VERSION];
@@ -57,7 +84,8 @@ pub fn handshake(stream: &mut TcpStream, app: &App, approve: &dyn Fn(&str, u32) 
     hello.extend_from_slice(app.pc_name.as_bytes());
     write_plain(stream, S_HELLO, &hello)?;
 
-    let (kind, body) = read_msg(stream)?;
+    let (kind, body) = read_msg(&mut Deadline(stream, Instant::now() + HELLO_DEADLINE))?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
     match kind {
         C_AUTH if body.len() >= 65 => {
             let (id, nc, proof, quality) = (&body[..16], &body[16..32], &body[32..64], body[64]);
@@ -85,11 +113,12 @@ pub fn handshake(stream: &mut TcpStream, app: &App, approve: &dyn Fn(&str, u32) 
                 tx: Seal::new(&crypto::derive(&device.key, b"s2c", &ns, nc)),
                 rx: Seal::new(&crypto::derive(&device.key, b"c2s", &ns, nc)),
                 device_name: device.name,
+                device_id: device.id,
             })))
         }
         C_PAIR_START if body.len() >= 32 => {
             let commitment: [u8; 32] = body[..32].try_into().unwrap();
-            let name = String::from_utf8_lossy(&body[32..]).to_string();
+            let name = clean_name(&body[32..]);
             let refuse = |stream: &mut TcpStream, code| -> io::Result<Outcome> {
                 write_plain(stream, S_PAIR_RESULT, &[code])?;
                 Ok(Outcome::Rejected("pairing refused"))
@@ -114,7 +143,7 @@ pub fn handshake(stream: &mut TcpStream, app: &App, approve: &dyn Fn(&str, u32) 
 fn pair(
     stream: &mut TcpStream,
     app: &App,
-    approve: &dyn Fn(&str, u32) -> bool,
+    approve: fn(&str, u32) -> bool,
     commitment: [u8; 32],
     name: &str,
 ) -> io::Result<Outcome> {
@@ -128,10 +157,15 @@ fn pair(
         write_plain(stream, S_PAIR_RESULT, &[RESULT_DENIED])?;
         return Ok(Outcome::Rejected("bad pairing key"));
     };
-    // Give the person time to walk over and click.
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
     let code = pairing::code(&phone_pub, &ours.public);
-    if !approve(name, code) {
+    // Give the person time to walk over and click, but not forever: an unanswered question
+    // would block every later pairing, and a late Yes would trust a device that has gone.
+    let (done, answer) = std::sync::mpsc::channel();
+    let asked = name.to_string();
+    std::thread::spawn(move || {
+        let _ = done.send(approve(&asked, code));
+    });
+    if !answer.recv_timeout(APPROVE_WAIT).unwrap_or(false) {
         write_plain(stream, S_PAIR_RESULT, &[RESULT_DENIED])?;
         return Ok(Outcome::Rejected("denied by user"));
     }
@@ -154,5 +188,12 @@ mod tests {
         for ip in ["81.2.69.160", "8.8.8.8", "2a00:1450::1"] {
             assert!(!is_local(ip.parse().unwrap()), "{ip}");
         }
+    }
+
+    #[test]
+    fn names_are_one_short_line() {
+        assert_eq!(clean_name(b"Pixel 8\n\nCheck it shows this code"), "Pixel 8Check it shows this code");
+        assert_eq!(clean_name("x".repeat(500).as_bytes()).len(), 40);
+        assert_eq!(clean_name(b" \n "), "Phone");
     }
 }

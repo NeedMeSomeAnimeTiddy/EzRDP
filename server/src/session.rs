@@ -71,6 +71,16 @@ pub fn run(stream: TcpStream, login: Login, info: Vec<u8>, _app: Arc<crate::stat
     shared.quality.store(login.quality, Relaxed);
     *CURRENT.lock().unwrap() = Some(tx.clone());
     let _ = tx.send(S_INFO, &info);
+    // Keep pinging from the start: listing screens can wait on a permission prompt (Wayland),
+    // and without pings the phone would give up and reconnect.
+    let pinger = {
+        let (tx, shared) = (tx.clone(), shared.clone());
+        std::thread::spawn(move || {
+            while !shared.stopped() && tx.send(S_PING, &[]).is_ok() {
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        })
+    };
 
     // Start on the screen the mouse is on: that's where the person was working.
     let mons = monitors();
@@ -95,15 +105,6 @@ pub fn run(stream: TcpStream, login: Login, info: Vec<u8>, _app: Arc<crate::stat
         std::thread::spawn(move || crate::audio::run(&shared, &tx))
     };
 
-    let pinger = {
-        let (tx, shared) = (tx.clone(), shared.clone());
-        std::thread::spawn(move || {
-            while !shared.stopped() && tx.send(S_PING, &[]).is_ok() {
-                std::thread::sleep(Duration::from_secs(2));
-            }
-        })
-    };
-
     let mut input = Input::new();
     let mut reader = Receiver::new(std::io::BufReader::new(stream.try_clone().unwrap()), login.rx);
     while !shared.stopped() {
@@ -116,11 +117,16 @@ pub fn run(stream: TcpStream, login: Login, info: Vec<u8>, _app: Arc<crate::stat
     let _ = video.join();
     let _ = audio.join();
     let _ = pinger.join();
-    crate::overlay::hide();
     {
         let mut cur = CURRENT.lock().unwrap();
-        if cur.as_ref().is_some_and(|t| Arc::ptr_eq(t, &tx)) {
-            *cur = None;
+        // Leave the banner alone if a newer session has already taken over.
+        match cur.as_ref() {
+            Some(t) if Arc::ptr_eq(t, &tx) => {
+                *cur = None;
+                crate::overlay::hide();
+            }
+            None => crate::overlay::hide(),
+            Some(_) => {}
         }
     }
     #[cfg(windows)]
@@ -295,6 +301,11 @@ fn video_loop(tx: &Sender, shared: &Shared) {
     'outer: while !shared.stopped() {
         let generation = shared.generation.load(Relaxed);
         let q = quality(shared.quality.load(Relaxed));
+        // A remembered screen may have been unplugged: fall back to the first, and say so.
+        let count = monitors().len();
+        if shared.monitor.load(Relaxed) as usize >= count && count > 0 {
+            shared.monitor.store(0, Relaxed);
+        }
         let mut cap = match Source::open(shared.monitor.load(Relaxed) as usize) {
             Ok(c) => c,
             Err(e) => {

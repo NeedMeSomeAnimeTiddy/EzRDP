@@ -36,12 +36,27 @@ struct View {
     stream: TcpStream,
     pressed: bool,
     sized: bool,
+    /// The window showing this phone, so a closing old window can't touch a newer phone.
+    hwnd: isize,
 }
 
 /// Only one phone can be shown at a time; a new one replaces the old.
 static VIEW: Mutex<Option<View>> = Mutex::new(None);
 
+/// Runs `f` on the phone shown in this window, if it is still the current one.
+fn with_view<T>(hwnd: HWND, f: impl FnOnce(&mut View) -> T) -> Option<T> {
+    VIEW.lock().unwrap().as_mut().filter(|v| v.hwnd == hwnd.0 as isize).map(f)
+}
+
 pub fn run(stream: TcpStream, login: Login, _app: Arc<App>) {
+    let mut decoder = match openh264::decoder::Decoder::new() {
+        Ok(d) => d,
+        Err(e) => {
+            crate::log!("phone view: decoder failed: {e}");
+            let _ = stream.shutdown(Shutdown::Both);
+            return;
+        }
+    };
     let tx = Arc::new(Sender::new(stream.try_clone().unwrap(), login.tx));
     let picture = Arc::new(Mutex::new(Picture::default()));
 
@@ -55,6 +70,7 @@ pub fn run(stream: TcpStream, login: Login, _app: Arc<App>) {
         stream: stream.try_clone().unwrap(),
         pressed: false,
         sized: false,
+        hwnd: 0,
     });
 
     let title = format!("{} — EzRDP", login.device_name);
@@ -62,19 +78,23 @@ pub fn run(stream: TcpStream, login: Login, _app: Arc<App>) {
     let window = std::thread::spawn(move || window_thread(&title, hwnd_tx));
     let Ok(hwnd) = hwnd_rx.recv() else {
         let _ = stream.shutdown(Shutdown::Both);
+        let mut slot = VIEW.lock().unwrap();
+        if slot.as_ref().is_some_and(|v| Arc::ptr_eq(&v.tx, &tx)) {
+            *slot = None;
+        }
         return;
     };
+    if let Some(v) = VIEW.lock().unwrap().as_mut().filter(|v| Arc::ptr_eq(&v.tx, &tx)) {
+        v.hwnd = hwnd;
+    }
+    // Draw "Waiting for the phone's screen…" now that the window knows its phone.
+    unsafe {
+        let _ = InvalidateRect(Some(HWND(hwnd as *mut _)), None, false);
+    }
     let post = |msg| unsafe {
         let _ = PostMessageW(Some(HWND(hwnd as *mut _)), msg, WPARAM(0), LPARAM(0));
     };
 
-    let mut decoder = match openh264::decoder::Decoder::new() {
-        Ok(d) => d,
-        Err(e) => {
-            crate::log!("phone view: decoder failed: {e}");
-            return;
-        }
-    };
     let mut reader = Receiver::new_video(std::io::BufReader::new(stream.try_clone().unwrap()), login.rx);
     let mut rgba = Vec::new();
     let mut waiting_for_key = false;
@@ -85,7 +105,7 @@ pub fn run(stream: TcpStream, login: Login, _app: Arc<App>) {
                 if let Ok(d) = openh264::decoder::Decoder::new() {
                     decoder = d;
                 }
-                if let Some(v) = VIEW.lock().unwrap().as_mut() {
+                if let Some(v) = VIEW.lock().unwrap().as_mut().filter(|v| Arc::ptr_eq(&v.tx, &tx)) {
                     v.sized = false;
                 }
             }
@@ -136,15 +156,15 @@ pub fn run(stream: TcpStream, login: Login, _app: Arc<App>) {
     }
 }
 
-fn send(kind: u8, payload: &[u8]) {
-    let tx = VIEW.lock().unwrap().as_ref().map(|v| v.tx.clone());
+fn send(hwnd: HWND, kind: u8, payload: &[u8]) {
+    let tx = with_view(hwnd, |v| v.tx.clone());
     if let Some(tx) = tx {
         let _ = tx.send(kind, payload);
     }
 }
 
-fn nav(n: u8) {
-    send(S_NAV, &[n]);
+fn nav(hwnd: HWND, n: u8) {
+    send(hwnd, S_NAV, &[n]);
 }
 
 /// Where the phone picture is drawn inside the window (keeps its shape, centred).
@@ -168,43 +188,37 @@ fn to_phone(hwnd: HWND, lparam: LPARAM) -> (f32, f32) {
     unsafe {
         let _ = GetClientRect(hwnd, &mut client);
     }
-    let (pw, ph) = VIEW
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|v| {
-            let p = v.picture.lock().unwrap();
-            (p.w, p.h)
-        })
-        .unwrap_or((0, 0));
+    let (pw, ph) = with_view(hwnd, |v| {
+        let p = v.picture.lock().unwrap();
+        (p.w, p.h)
+    })
+    .unwrap_or((0, 0));
     let r = picture_rect(client, pw, ph);
     let fx = (x - r.left as f32) / (r.right - r.left).max(1) as f32;
     let fy = (y - r.top as f32) / (r.bottom - r.top).max(1) as f32;
     (fx.clamp(0.0, 1.0), fy.clamp(0.0, 1.0))
 }
 
-fn touch(action: u8, (x, y): (f32, f32)) {
+fn touch(hwnd: HWND, action: u8, (x, y): (f32, f32)) {
     let mut p = vec![action];
     p.extend_from_slice(&x.to_be_bytes());
     p.extend_from_slice(&y.to_be_bytes());
-    send(S_TOUCH, &p);
+    send(hwnd, S_TOUCH, &p);
 }
 
 /// Makes the window the phone's shape the first time a picture arrives (or after rotating).
 fn fit_window(hwnd: HWND) {
-    let size = {
-        let mut slot = VIEW.lock().unwrap();
-        let Some(v) = slot.as_mut() else { return };
-        if v.sized {
-            return;
-        }
+    let size = with_view(hwnd, |v| {
         let p = v.picture.lock().unwrap();
-        if p.w == 0 {
-            return;
+        if v.sized || p.w == 0 {
+            return None;
         }
+        let size = (p.w, p.h);
+        drop(p);
         v.sized = true;
-        (p.w, p.h)
-    };
+        Some(size)
+    });
+    let Some(Some(size)) = size else { return };
     unsafe {
         let mut work = RECT::default();
         let _ = SystemParametersInfoW(SPI_GETWORKAREA, 0, Some(&mut work as *mut _ as *mut _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0));
@@ -225,7 +239,7 @@ fn paint(hwnd: HWND) {
         let dc = BeginPaint(hwnd, &mut ps);
         let mut client = RECT::default();
         let _ = GetClientRect(hwnd, &mut client);
-        let picture = VIEW.lock().unwrap().as_ref().map(|v| v.picture.clone());
+        let picture = with_view(hwnd, |v| v.picture.clone());
         let black = HBRUSH(GetStockObject(BLACK_BRUSH).0);
         match picture {
             Some(pic) => {
@@ -304,16 +318,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             unsafe {
                 SetCapture(hwnd);
             }
-            if let Some(v) = VIEW.lock().unwrap().as_mut() {
-                v.pressed = true;
-            }
-            touch(0, to_phone(hwnd, lparam));
+            with_view(hwnd, |v| v.pressed = true);
+            touch(hwnd, 0, to_phone(hwnd, lparam));
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
-            let pressed = VIEW.lock().unwrap().as_ref().is_some_and(|v| v.pressed);
-            if pressed {
-                touch(1, to_phone(hwnd, lparam));
+            if with_view(hwnd, |v| v.pressed) == Some(true) {
+                touch(hwnd, 1, to_phone(hwnd, lparam));
             }
             LRESULT(0)
         }
@@ -321,18 +332,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             unsafe {
                 let _ = ReleaseCapture();
             }
-            let was = VIEW.lock().unwrap().as_mut().map(|v| std::mem::replace(&mut v.pressed, false));
+            let was = with_view(hwnd, |v| std::mem::replace(&mut v.pressed, false));
             if was == Some(true) {
-                touch(2, to_phone(hwnd, lparam));
+                touch(hwnd, 2, to_phone(hwnd, lparam));
             }
             LRESULT(0)
         }
         WM_RBUTTONUP => {
-            nav(NAV_BACK);
+            nav(hwnd, NAV_BACK);
             LRESULT(0)
         }
         WM_MBUTTONUP => {
-            nav(NAV_HOME);
+            nav(hwnd, NAV_HOME);
             LRESULT(0)
         }
         WM_MOUSEWHEEL => {
@@ -348,40 +359,40 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             for v in [x, y, 0.0, notches * 0.16] {
                 p.extend_from_slice(&f32::to_be_bytes(v));
             }
-            send(S_SWIPE, &p);
+            send(hwnd, S_SWIPE, &p);
             LRESULT(0)
         }
         WM_CHAR => {
             if let Some(c) = char::from_u32(wparam.0 as u32).filter(|c| !c.is_control()) {
-                send(S_TYPE, c.to_string().as_bytes());
+                send(hwnd, S_TYPE, c.to_string().as_bytes());
             }
             LRESULT(0)
         }
         WM_KEYDOWN => {
             match VIRTUAL_KEY(wparam.0 as u16) {
-                VK_BACK => nav(NAV_BACKSPACE),
-                VK_RETURN => nav(NAV_ENTER),
-                VK_ESCAPE => nav(NAV_BACK),
-                VK_HOME => nav(NAV_HOME),
+                VK_BACK => nav(hwnd, NAV_BACKSPACE),
+                VK_RETURN => nav(hwnd, NAV_ENTER),
+                VK_ESCAPE => nav(hwnd, NAV_BACK),
+                VK_HOME => nav(hwnd, NAV_HOME),
                 _ => {}
             }
             LRESULT(0)
         }
         WM_COMMAND => {
             match wparam.0 & 0xffff {
-                ID_BACK => nav(NAV_BACK),
-                ID_HOME => nav(NAV_HOME),
-                ID_RECENTS => nav(NAV_RECENTS),
-                ID_NOTIFICATIONS => nav(NAV_NOTIFICATIONS),
+                ID_BACK => nav(hwnd, NAV_BACK),
+                ID_HOME => nav(hwnd, NAV_HOME),
+                ID_RECENTS => nav(hwnd, NAV_RECENTS),
+                ID_NOTIFICATIONS => nav(hwnd, NAV_NOTIFICATIONS),
                 _ => {}
             }
             LRESULT(0)
         }
         WM_CLOSE => {
             // Closing the window ends the phone's sharing.
-            if let Some(v) = VIEW.lock().unwrap().as_ref() {
+            with_view(hwnd, |v| {
                 let _ = v.stream.shutdown(Shutdown::Both);
-            }
+            });
             unsafe {
                 let _ = DestroyWindow(hwnd);
             }

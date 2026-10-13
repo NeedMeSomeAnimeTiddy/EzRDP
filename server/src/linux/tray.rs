@@ -104,7 +104,7 @@ impl ksni::Tray for Tray {
                     let now = !app.paused();
                     app.paused.store(now, Relaxed);
                     if now {
-                        crate::session::end(crate::protocol::BYE_PAUSED);
+                        crate::server::pause_all();
                     }
                 }
             }));
@@ -113,13 +113,11 @@ impl ksni::Tray for Tray {
             let mut trusted: Vec<MenuItem<Self>> = devices
                 .iter()
                 .map(|d| {
-                    let (id, name) = (d.id, d.name.clone());
+                    let id = d.id;
                     item(format!("Remove {}", d.name), move |t: &mut Self| {
                         if let Some(app) = &t.app {
                             app.trusted.lock().unwrap().remove(&id);
-                            if app.connected.lock().unwrap().as_deref() == Some(name.as_str()) {
-                                crate::session::end(crate::protocol::BYE_REMOVED);
-                            }
+                            crate::server::drop_device(app, &id);
                         }
                     })
                 })

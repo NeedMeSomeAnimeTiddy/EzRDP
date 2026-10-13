@@ -13,6 +13,8 @@ pub struct App {
     pub trusted: Mutex<Trusted>,
     /// Name of the phone currently connected, if any.
     pub connected: Mutex<Option<String>>,
+    /// Its trusted-device id (names aren't unique: the same phone can be paired twice).
+    pub connected_id: Mutex<Option<[u8; 16]>>,
     /// This PC's internet address, when known.
     pub public_ip: Mutex<Option<IpAddr>>,
     /// Only one "Allow this phone?" prompt at a time.

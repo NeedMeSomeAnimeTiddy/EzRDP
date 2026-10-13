@@ -29,6 +29,29 @@ pub fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
     Some(out)
 }
 
+/// The file holds every device's key, so only this user (and admins) may read or change it.
+#[cfg(unix)]
+fn keep_private(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+
+#[cfg(windows)]
+fn keep_private(path: &std::path::Path) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let Ok(user) = std::env::var("USERNAME") else { return };
+    // Drop the inherited "all users can change this" rights; keep this user, SYSTEM and admins.
+    let _ = std::process::Command::new("icacls")
+        .arg(path)
+        .args(["/inheritance:r", "/grant:r", &format!("{user}:F"), "*S-1-5-18:F", "*S-1-5-32-544:F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+}
+
+#[cfg(not(any(unix, windows)))]
+fn keep_private(_: &std::path::Path) {}
+
 impl Trusted {
     pub fn load(path: PathBuf) -> Self {
         let text = std::fs::read_to_string(&path).unwrap_or_default();
@@ -44,6 +67,9 @@ impl Trusted {
                 })
             })
             .collect();
+        if path.exists() {
+            keep_private(&path);
+        }
         Self { path, devices }
     }
 
@@ -53,6 +79,7 @@ impl Trusted {
             text += &format!("{} {} {}\n", hex(&d.id), hex(&d.key), d.name);
         }
         let _ = std::fs::write(&self.path, text);
+        keep_private(&self.path);
     }
 
     pub fn find(&self, id: &[u8]) -> Option<&Device> {

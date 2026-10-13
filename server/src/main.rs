@@ -98,6 +98,11 @@ fn data_path(file: &str) -> PathBuf {
         .unwrap_or_else(std::env::temp_dir);
     let dir = base.join("ezrdp");
     let _ = std::fs::create_dir_all(&dir);
+    // The trusted-device keys live here: keep other users on this PC out.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
     dir.join(file)
 }
 
@@ -182,6 +187,7 @@ fn new_app(cfg: &Config) -> Arc<App> {
         paused: AtomicBool::new(false),
         trusted: Mutex::new(trust::Trusted::load(data_path("trusted.txt"))),
         connected: Mutex::new(None),
+        connected_id: Mutex::new(None),
         public_ip: Mutex::new(None),
         pairing: AtomicBool::new(false),
         on_change: Mutex::new(None),
@@ -254,12 +260,15 @@ fn approve_linux(name: &str, code: u32) -> bool {
     use std::io::IsTerminal;
     use std::process::{Command, Stdio};
     let code = pairing::format_code(code);
+    // No markup in the name: zenity and kdialog would treat tags in it as formatting.
+    let name = name.replace(['<', '>', '&'], "");
     let text = format!(
-        "A device wants to control this PC:\n\n    {name}\n\nCheck it shows this code:\n\n    {code}\n\n\
-         Only click Yes if it's yours and the codes match."
+        "A device wants to control this PC. Check it shows this code:\n\n    {code}\n\n\
+         It calls itself: {name}\n\nOnly click Yes if it's yours and the codes match."
     );
     let quiet = |c: &mut Command| c.stdout(Stdio::null()).stderr(Stdio::null()).status();
-    if let Ok(s) = quiet(Command::new("zenity").args(["--question", "--title=EzRDP", "--width=360", "--default-cancel"]).arg(format!("--text={text}"))) {
+    let zenity = ["--question", "--title=EzRDP", "--width=360", "--default-cancel", "--timeout=120"];
+    if let Ok(s) = quiet(Command::new("zenity").args(zenity).arg(format!("--text={text}"))) {
         return s.success();
     }
     if let Ok(s) = quiet(Command::new("kdialog").args(["--title", "EzRDP", "--yesno", &text])) {
