@@ -199,6 +199,22 @@ pub fn bring_onto(m: &Monitor) {
     }
 }
 
+/// Gets the mouse back after a program (a game, a capture script) quit without letting go of it:
+/// lifts any "keep the pointer inside this box" lock, unblocks input, lets go of stuck buttons
+/// and brings back the normal pointer shapes.
+pub fn free_mouse() {
+    unsafe {
+        let _ = ClipCursor(None);
+        let _ = BlockInput(false);
+        let _ = SystemParametersInfoW(SPI_SETCURSORS, 0, None, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0));
+    }
+    send(&[
+        mouse(MOUSEEVENTF_LEFTUP, 0, 0, 0),
+        mouse(MOUSEEVENTF_RIGHTUP, 0, 0, 0),
+        mouse(MOUSEEVENTF_MIDDLEUP, 0, 0, 0),
+    ]);
+}
+
 /// Cursor position in screen pixels, or `None` if it's hidden.
 pub fn cursor() -> Option<(i32, i32)> {
     let mut ci = CURSORINFO { cbSize: std::mem::size_of::<CURSORINFO>() as u32, ..Default::default() };
