@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Input::KeyboardAndMouse::{MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey, VK_F12};
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, w};
@@ -22,7 +23,11 @@ const ID_ADD_PHONE: usize = 6;
 const ID_FIREWALL: usize = 7;
 const ID_WINDOW: usize = 8;
 const ID_ADMIN: usize = 9;
+const ID_FREE_MOUSE: usize = 10;
 const ID_REMOVE_PHONE: usize = 100;
+
+/// Ctrl+Alt+F12 anywhere on the PC frees a mouse that a program left locked.
+const HOTKEY_FREE_MOUSE: i32 = 1;
 
 static APP: OnceLock<Arc<App>> = OnceLock::new();
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
@@ -204,6 +209,7 @@ fn show_menu(app: &App) {
         }
         add(MF_STRING | if admin { MF_CHECKED } else { MF_UNCHECKED }, ID_ADMIN, "Control admin windows too");
         add(MF_STRING, ID_INFO, "Connection info");
+        add(MF_STRING, ID_FREE_MOUSE, "Free the mouse (Ctrl+Alt+F12)");
         if !FIREWALL_OK.load(Relaxed) {
             add(MF_STRING, ID_FIREWALL, "Allow through Windows Firewall...");
         }
@@ -276,6 +282,7 @@ fn handle(app: &App, cmd: usize, devices: &[crate::trust::Device]) {
             );
             message(&text, MB_OK | MB_ICONINFORMATION);
         }
+        ID_FREE_MOUSE => crate::input::free_mouse(),
         ID_ADD_PHONE => {
             message(
                 "To add a phone:\n\n1. Connect the phone to the same Wi-Fi as this PC.\n2. Open EzRDP on the phone.\n\
@@ -331,6 +338,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 unsafe {
                     let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
                 }
+            }
+            LRESULT(0)
+        }
+        WM_HOTKEY => {
+            if wparam.0 as i32 == HOTKEY_FREE_MOUSE {
+                crate::input::free_mouse();
             }
             LRESULT(0)
         }
@@ -419,6 +432,7 @@ pub fn run(app: Arc<App>) {
         add_icon(&app);
         // Ctrl+Esc on the PC's own keyboard ends the phone's session.
         let _ = SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_hook), Some(instance), 0);
+        let _ = RegisterHotKey(Some(window), HOTKEY_FREE_MOUSE, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_F12.0 as u32);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {

@@ -46,6 +46,9 @@ Upright and sideways screens each have their own button layout.
 While a phone is connected, the PC shows a blue frame around the screen being viewed and a
 banner at the top ("… is controlling this PC"). Click the banner, or press **Ctrl+Esc** on the
 PC's keyboard, to disconnect the phone. (Ctrl+Esc sent from the phone still opens Start as usual.)
+
+If a game or script quits and leaves the mouse stuck or locked, press **Ctrl+Alt+F12** on the PC (or use
+**Free the mouse** in the tray menu). It unlocks the pointer and lets go of stuck buttons.
 Windows 10 (2004+) and 11 keep the frame and banner out of what the phone sees.
 
 ### Gestures (Both mode)
