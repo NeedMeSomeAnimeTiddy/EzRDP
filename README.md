@@ -47,8 +47,9 @@ While a phone is connected, the PC shows a blue frame around the screen being vi
 banner at the top ("… is controlling this PC"). Click the banner, or press **Ctrl+Esc** on the
 PC's keyboard, to disconnect the phone. (Ctrl+Esc sent from the phone still opens Start as usual.)
 
-If a game or script quits and leaves the mouse stuck or locked, press **Ctrl+Alt+F12** on the PC (or use
-**Free the mouse** in the tray menu). It unlocks the pointer and lets go of stuck buttons.
+If a game or script is killed and leaves the mouse stuck or locked, EzRDP lifts the lock by itself within a
+second or two (a game that is still running in front keeps its lock). To do it right away, press
+**Ctrl+Alt+F12** on the PC (or use **Free the mouse** in the tray menu), which also lets go of stuck buttons.
 Windows 10 (2004+) and 11 keep the frame and banner out of what the phone sees.
 
 ### Gestures (Both mode)

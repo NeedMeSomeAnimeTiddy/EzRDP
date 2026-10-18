@@ -433,6 +433,7 @@ pub fn run(app: Arc<App>) {
         // Ctrl+Esc on the PC's own keyboard ends the phone's session.
         let _ = SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_hook), Some(instance), 0);
         let _ = RegisterHotKey(Some(window), HOTKEY_FREE_MOUSE, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_F12.0 as u32);
+        crate::input::watch_for_orphaned_clip();
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {

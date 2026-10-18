@@ -1,7 +1,7 @@
 //! Mouse and keyboard injection with SendInput.
 
 use crate::capture::Monitor;
-use windows::Win32::Foundation::POINT;
+use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -213,6 +213,104 @@ pub fn free_mouse() {
         mouse(MOUSEEVENTF_RIGHTUP, 0, 0, 0),
         mouse(MOUSEEVENTF_MIDDLEUP, 0, 0, 0),
     ]);
+}
+
+/// Whether `inner` lies inside `outer`, give or take `slack` pixels (window borders and shadows).
+fn rect_within(inner: &RECT, outer: &RECT, slack: i32) -> bool {
+    inner.left >= outer.left - slack
+        && inner.top >= outer.top - slack
+        && inner.right <= outer.right + slack
+        && inner.bottom <= outer.bottom + slack
+}
+
+/// A "keep the pointer inside this box" lock (`ClipCursor`) is in force, and nothing in front can
+/// be the one holding it. A game grabbing the mouse is always the window in front, and its box is
+/// inside that window. Windows does not lift the lock when the program that set it is killed, which
+/// is how capture scripts leave the pointer stuck: the game is gone, and what is in front is the
+/// desktop, the taskbar, or some other window the box doesn't fit in.
+fn clip_is_orphaned() -> bool {
+    unsafe {
+        let mut clip = RECT::default();
+        if GetClipCursor(&mut clip).is_err() {
+            return false;
+        }
+        let virt = RECT {
+            left: GetSystemMetrics(SM_XVIRTUALSCREEN),
+            top: GetSystemMetrics(SM_YVIRTUALSCREEN),
+            right: GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            bottom: GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        };
+        if rect_within(&virt, &clip, 0) {
+            return false; // the box is the whole desktop: no lock
+        }
+        let front = GetForegroundWindow();
+        if front.is_invalid() || front == GetShellWindow() || front == GetDesktopWindow() {
+            return true;
+        }
+        let mut class = [0u16; 64];
+        let len = GetClassNameW(front, &mut class).max(0) as usize;
+        let class = String::from_utf16_lossy(&class[..len]);
+        if matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
+            return true;
+        }
+        let mut window = RECT::default();
+        if GetWindowRect(front, &mut window).is_err() {
+            return false;
+        }
+        !rect_within(&clip, &window, 32)
+    }
+}
+
+/// Starts a background check that lifts a pointer lock whose program is gone, so a game that was
+/// killed doesn't leave the pointer stuck and a remote viewer without a way to unstick it.
+/// It has to see the lock orphaned twice in a row, so a game switching windows isn't disturbed.
+pub fn watch_for_orphaned_clip() {
+    std::thread::spawn(|| {
+        let mut seen = 0;
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if clip_is_orphaned() {
+                seen += 1;
+                if seen >= 2 {
+                    unsafe {
+                        let _ = ClipCursor(None);
+                    }
+                    crate::log!("lifted a pointer lock left behind by a program that quit");
+                    seen = 0;
+                }
+            } else {
+                seen = 0;
+            }
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT { left, top, right, bottom }
+    }
+
+    #[test]
+    fn a_box_inside_the_window_in_front_is_not_orphaned() {
+        let window = rect(100, 100, 1380, 820);
+        assert!(rect_within(&rect(108, 131, 1372, 812), &window, 32));
+    }
+
+    #[test]
+    fn a_box_the_window_doesnt_hold_is_orphaned() {
+        let window = rect(0, 0, 800, 600);
+        assert!(!rect_within(&rect(1000, 500, 2000, 1100), &window, 32));
+    }
+
+    #[test]
+    fn the_whole_desktop_counts_as_no_lock() {
+        let desktop = rect(0, 0, 4096, 1152);
+        assert!(rect_within(&desktop, &rect(0, 0, 4096, 1152), 0));
+        assert!(!rect_within(&desktop, &rect(0, 0, 4000, 1100), 0));
+    }
 }
 
 /// Cursor position in screen pixels, or `None` if it's hidden.
