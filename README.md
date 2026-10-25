@@ -52,6 +52,10 @@ second or two (a game that is still running in front keeps its lock). To do it r
 **Ctrl+Alt+F12** on the PC (or use **Free the mouse** in the tray menu), which also lets go of stuck buttons.
 Windows 10 (2004+) and 11 keep the frame and banner out of what the phone sees.
 
+If part of EzRDP on the PC ever gets stuck (phones can't connect, or connect but get no picture),
+it notices within a few minutes and restarts itself. What happened is written to `ezrdp.log` next to
+`EzRDP.exe` (the run before is kept as `ezrdp.old.log`).
+
 ### Gestures (Both mode)
 
 | Do this | Get this |

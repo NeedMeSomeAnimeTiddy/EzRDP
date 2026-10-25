@@ -121,6 +121,7 @@ pub fn listen(app: Arc<App>, approve: Approve, run: RunSession) -> std::io::Resu
         let app = app.clone();
         let spawned = std::thread::Builder::new().spawn(move || {
             let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+            let local = stream.peer_addr().is_ok_and(|a| a.ip().is_loopback());
             let _ = stream.set_nodelay(true);
             let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
             let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
@@ -171,6 +172,8 @@ pub fn listen(app: Arc<App>, approve: Approve, run: RunSession) -> std::io::Resu
                     app.changed();
                 }
                 Ok(Outcome::Rejected(why)) => log!("Refused {peer}: {why}"),
+                // EzRDP checking its own port (watchdog.rs) hangs up after the greeting.
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && local => {}
                 Err(e) => log!("Connection from {peer} failed: {e}"),
             }
         });
