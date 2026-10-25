@@ -5,7 +5,7 @@ use crate::log;
 use crate::state::App;
 use std::collections::HashMap;
 use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -53,6 +53,26 @@ static ACTIVE: Mutex<Option<(u64, TcpStream)>> = Mutex::new(None);
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// Phones sharing their own screen with this PC: (connection, device id, socket).
 static SHARING: Mutex<Vec<(u64, [u8; 16], TcpStream)>> = Mutex::new(Vec::new());
+
+/// What the listening thread is doing, for the log if the port stops answering.
+static LISTENER: AtomicU8 = AtomicU8::new(0);
+const LISTENER_STAGES: [&str; 3] = ["not started", "waiting for connections", "taking a connection"];
+
+/// A line for the log about the state of connections, without waiting on anything that may be stuck.
+pub fn status() -> String {
+    let logging_in = match LOGGING_IN.try_lock() {
+        Ok(g) => g.as_ref().map_or(0, |m| m.values().sum::<usize>()).to_string(),
+        Err(_) => "unknown (busy)".into(),
+    };
+    let phone = match ACTIVE.try_lock() {
+        Ok(g) => if g.is_some() { "connected" } else { "none" },
+        Err(_) => "unknown (busy)",
+    };
+    format!(
+        "listener: {}, logging in: {logging_in}, phone: {phone}",
+        LISTENER_STAGES[LISTENER.load(Relaxed) as usize]
+    )
+}
 
 pub fn lan_ip() -> Option<IpAddr> {
     let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
@@ -115,9 +135,24 @@ pub fn listen(app: Arc<App>, approve: Approve, run: RunSession) -> std::io::Resu
             Err(e) => return Err(e),
         }
     };
+    LISTENER.store(1, Relaxed);
     for conn in listener.incoming() {
-        let Ok(mut stream) = conn else { continue };
-        let Some(slot) = stream.peer_addr().ok().and_then(|a| Slot::take(a.ip())) else { continue };
+        LISTENER.store(2, Relaxed);
+        let Ok(mut stream) = conn else {
+            LISTENER.store(1, Relaxed);
+            continue;
+        };
+        let Some(slot) = stream.peer_addr().ok().and_then(|a| Slot::take(a.ip())) else {
+            // Normally never happens: say so (once a minute at most), it means logins are piling up.
+            static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+            let mut last = LAST.lock().unwrap();
+            if last.is_none_or(|t| t.elapsed() > Duration::from_secs(60)) {
+                *last = Some(std::time::Instant::now());
+                log!("Turned a connection away: too many still logging in ({})", status());
+            }
+            LISTENER.store(1, Relaxed);
+            continue;
+        };
         let app = app.clone();
         let spawned = std::thread::Builder::new().spawn(move || {
             let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
@@ -181,6 +216,7 @@ pub fn listen(app: Arc<App>, approve: Approve, run: RunSession) -> std::io::Resu
             // Out of threads for now: drop this connection but keep listening.
             log!("Couldn't take a connection: {e}");
         }
+        LISTENER.store(1, Relaxed);
     }
     Ok(())
 }
