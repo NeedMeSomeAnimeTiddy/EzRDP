@@ -1,6 +1,8 @@
 //! Mouse and keyboard injection with SendInput.
 
 use crate::capture::Monitor;
+use std::sync::{Mutex, Once};
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{POINT, RECT};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -72,27 +74,73 @@ fn to_normalized(px: i32, size: i32) -> i32 {
     ((((px as i64) * 2 + 1) * 65536 / (2 * size as i64)) as i32).clamp(0, 65535)
 }
 
+/// Moves the pointer to a screen pixel.
+fn move_to(x: i32, y: i32) {
+    unsafe {
+        let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        let vw = GetSystemMetrics(SM_CXVIRTUALSCREEN).max(2);
+        let vh = GetSystemMetrics(SM_CYVIRTUALSCREEN).max(2);
+        let nx = to_normalized(x - vx, vw);
+        let ny = to_normalized(y - vy, vh);
+        send(&[mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, nx, ny, 0)]);
+    }
+}
+
+/// Where the last move should have put the pointer, and when it was sent.
+static LANDING: Mutex<Option<(POINT, Instant)>> = Mutex::new(None);
+
+/// Once moves stop, checks the pointer really ended up where it was sent, and puts it there if
+/// it's a pixel or two off (Windows' own rounding). A bigger difference means someone moved the
+/// real mouse or a program is holding it, so it's left alone.
+fn check_landing(target: POINT) {
+    static WATCHER: Once = Once::new();
+    *LANDING.lock().unwrap() = Some((target, Instant::now()));
+    WATCHER.call_once(|| {
+        std::thread::spawn(|| {
+            loop {
+                std::thread::sleep(Duration::from_millis(30));
+                let mut landing = LANDING.lock().unwrap();
+                let Some((target, at)) = *landing else { continue };
+                if at.elapsed() < Duration::from_millis(60) {
+                    continue;
+                }
+                *landing = None;
+                let mut p = POINT::default();
+                unsafe {
+                    let _ = GetCursorPos(&mut p);
+                }
+                let (dx, dy) = ((p.x - target.x).abs(), (p.y - target.y).abs());
+                if (dx, dy) != (0, 0) && dx <= 2 && dy <= 2 {
+                    unsafe {
+                        let _ = SetCursorPos(target.x, target.y);
+                    }
+                }
+            }
+        });
+    });
+}
+
+/// Turns a 0..1 fraction of `size` pixels into a pixel. The exact opposite of how the pointer's
+/// position is reported back (pixel / size), so the other side draws it where it was sent.
+fn to_pixel(f: f32, size: i32) -> i32 {
+    ((f.clamp(0.0, 1.0) as f64 * size as f64 + 1e-3).floor() as i32).min(size - 1)
+}
+
 impl Input {
     pub fn new() -> Self {
         Self { frac: (0.0, 0.0), last_move: None, held_keys: Vec::new(), held_buttons: [false; 3] }
     }
 
     fn move_to(&self, x: i32, y: i32) {
-        unsafe {
-            let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
-            let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
-            let vw = GetSystemMetrics(SM_CXVIRTUALSCREEN).max(2);
-            let vh = GetSystemMetrics(SM_CYVIRTUALSCREEN).max(2);
-            let nx = to_normalized(x - vx, vw);
-            let ny = to_normalized(y - vy, vh);
-            send(&[mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, nx, ny, 0)]);
-        }
+        move_to(x, y);
+        check_landing(POINT { x, y });
     }
 
     /// Moves to a point given as 0..1 fractions of the monitor.
     pub fn move_abs(&mut self, m: &Monitor, fx: f32, fy: f32) {
-        let x = m.x + (fx.clamp(0.0, 1.0) * (m.w - 1) as f32).round() as i32;
-        let y = m.y + (fy.clamp(0.0, 1.0) * (m.h - 1) as f32).round() as i32;
+        let x = m.x + to_pixel(fx, m.w);
+        let y = m.y + to_pixel(fy, m.h);
         self.frac = (0.0, 0.0);
         self.last_move = None;
         self.move_to(x, y);
@@ -212,7 +260,7 @@ pub fn bring_onto(m: &Monitor) {
         let _ = GetCursorPos(&mut p);
     }
     if p.x < m.x || p.x >= m.x + m.w || p.y < m.y || p.y >= m.y + m.h {
-        Input::new().move_to(m.x + m.w / 2, m.y + m.h / 2);
+        move_to(m.x + m.w / 2, m.y + m.h / 2);
     }
 }
 
@@ -317,6 +365,17 @@ mod tests {
                 let n = to_normalized(px, size) as i64;
                 assert_eq!((n * size as i64 / 65536) as i32, px, "size {size} px {px}");
             }
+        }
+    }
+
+    #[test]
+    fn fractions_turn_into_the_pixel_they_were_reported_as() {
+        for size in [1366, 1920, 2560] {
+            for px in 0..size {
+                assert_eq!(to_pixel(px as f32 / size as f32, size), px, "size {size} px {px}");
+            }
+            assert_eq!(to_pixel(1.0, size), size - 1);
+            assert_eq!(to_pixel(0.0, size), 0);
         }
     }
 

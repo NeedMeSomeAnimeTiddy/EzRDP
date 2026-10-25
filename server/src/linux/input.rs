@@ -213,6 +213,12 @@ pub struct Input {
     held_buttons: [bool; 3],
 }
 
+/// Turns a 0..1 fraction of `size` pixels into a pixel. The exact opposite of how the pointer's
+/// position is reported back (pixel / size), so the other side draws it where it was sent.
+fn to_pixel(f: f32, size: i32) -> i32 {
+    ((f.clamp(0.0, 1.0) as f64 * size as f64 + 1e-3).floor() as i32).min(size - 1)
+}
+
 impl Input {
     pub fn new() -> Self {
         if super::wayland::active() {
@@ -238,8 +244,8 @@ impl Input {
         if let Some(w) = &self.wl {
             return w.move_abs(m, fx, fy);
         }
-        let x = m.x + (fx.clamp(0.0, 1.0) * (m.w - 1) as f32).round() as i32;
-        let y = m.y + (fy.clamp(0.0, 1.0) * (m.h - 1) as f32).round() as i32;
+        let x = m.x + to_pixel(fx, m.w);
+        let y = m.y + to_pixel(fy, m.h);
         self.frac = (0.0, 0.0);
         self.move_to(x, y);
     }
@@ -418,5 +424,15 @@ mod tests {
         assert_eq!(keysym(0x71), Some(0xffbf)); // F2
         assert_eq!(char_keysym('é'), 0xe9);
         assert_eq!(char_keysym('€'), 0x0100_20ac);
+    }
+
+    #[test]
+    fn fractions_turn_into_the_pixel_they_were_reported_as() {
+        for size in [800, 1366, 1920, 2560, 3840, 5120, 7680] {
+            for px in 0..size {
+                assert_eq!(to_pixel(px as f32 / size as f32, size), px, "size {size} px {px}");
+            }
+            assert_eq!(to_pixel(1.0, size), size - 1);
+        }
     }
 }
