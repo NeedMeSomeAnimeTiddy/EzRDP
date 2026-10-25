@@ -24,3 +24,21 @@ Why this way:
   DLLs next to it. It's only for checking.
 - Don't try to build for `x86_64-pc-windows-msvc` on Linux: the video encoder's C code needs
   Microsoft's Windows headers, which aren't available there.
+
+## Checking the phone app
+
+Before pushing any change under `android/`, build it and run its tests. Without an Android
+SDK in the session, install one first (about 5 minutes):
+
+```sh
+export ANDROID_HOME=$HOME/android-sdk
+mkdir -p $ANDROID_HOME && cd $ANDROID_HOME
+curl -sSfL -o tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+unzip -q tools.zip && mkdir -p cmdline-tools/latest && mv cmdline-tools/{bin,lib,NOTICE.txt,source.properties} cmdline-tools/latest/
+yes | cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null
+cmdline-tools/latest/bin/sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+```
+
+Then, from `android/`: `./gradlew --no-daemon assembleDebug testDebugUnitTest`.
+The tests re-save `screenshots/*.png`; put those back (`git checkout screenshots/`) unless the
+change is meant to alter the screens. The official `EzRDP.apk` comes from GitHub Actions.
