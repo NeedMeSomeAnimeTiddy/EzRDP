@@ -77,6 +77,10 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
     private var cursorY = 0f
     private var cursorVisible = true
     private var lastLocalMove = 0L
+    // The pointer can go right up to the far edge: the PC turns fraction x size into a pixel by
+    // rounding down, so stopping a whole video pixel short would never reach its last pixels.
+    private val maxX get() = videoW - 0.01f
+    private val maxY get() = videoH - 0.01f
 
     init {
         video.holder.addCallback(this)
@@ -153,8 +157,13 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
         }
         // The pointer may be on another monitor (fractions outside 0..1): then don't draw it.
         onThisScreen = remoteX in 0f..1f && remoteY in 0f..1f
-        cursorX = remoteX.coerceIn(0f, 1f) * videoW
-        cursorY = remoteY.coerceIn(0f, 1f) * videoH
+        val x = remoteX.coerceIn(0f, 1f) * videoW
+        val y = remoteY.coerceIn(0f, 1f) * videoH
+        // Within a pixel and a half is the same spot (the PC only knows whole pixels): keep ours,
+        // so the pointer doesn't twitch.
+        if (onThisScreen && hypot(x - cursorX, y - cursorY) < 1.5f) return
+        cursorX = x
+        cursorY = y
         invalidate()
     }
 
@@ -268,8 +277,8 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
                 val dx = centerX - oldX
                 val dy = centerY - oldY
                 if (dx != 0f || dy != 0f) {
-                    val nx = (cursorX + dx).coerceIn(0f, videoW - 1f)
-                    val ny = (cursorY + dy).coerceIn(0f, videoH - 1f)
+                    val nx = (cursorX + dx).coerceIn(0f, maxX)
+                    val ny = (cursorY + dy).coerceIn(0f, maxY)
                     sendPointer(nx, ny)
                 }
             }
@@ -328,6 +337,14 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
     private var grabDy = 0f
     private var longPressed = false
     private var multi = false
+    // Finger samples not applied yet. The newest ones are held back a moment, because a finger
+    // slides a little as it lifts; if it lifts while they are held, a small slide is dropped.
+    private val heldX = FloatArray(64)
+    private val heldY = FloatArray(64)
+    private val heldT = LongArray(64)
+    private var heldCount = 0
+    private var lastT = 0L
+    private val flushHeld = Runnable { applyHeld(heldCount) }
     private var lastTapTime = 0L
     private var lastTapX = 0f
     private var lastTapY = 0f
@@ -364,8 +381,8 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
     /** Moves the pointer to a spot in video pixels and tells the PC. */
     private fun sendPointer(x: Float, y: Float) {
         if (videoW == 0) return
-        cursorX = x.coerceIn(0f, videoW - 1f)
-        cursorY = y.coerceIn(0f, videoH - 1f)
+        cursorX = x.coerceIn(0f, maxX)
+        cursorY = y.coerceIn(0f, maxY)
         onThisScreen = true
         lastLocalMove = SystemClock.uptimeMillis()
         conn()?.mouseAbs(cursorX / videoW, cursorY / videoH)
@@ -374,22 +391,55 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
 
     private fun moveAbsTo(x: Float, y: Float) = sendPointer(toVideoX(x), toVideoY(y))
 
-    private fun moveRel(dxPx: Float, dyPx: Float) {
+    /** Finger speed in dp per millisecond, smoothed. */
+    private var speed = 0f
+
+    /**
+     * Trackpad move by a finger step of [dxPx], [dyPx] taking [dtMs]. The phone keeps the pointer's
+     * exact spot and sends it, so rounding on the PC can never add up into drift.
+     */
+    private fun moveRel(dxPx: Float, dyPx: Float, dtMs: Long) {
         if (videoW == 0) return
-        // Faster finger = bigger jump, slow finger = precise. Zooming in makes it finer still.
-        val dist = hypot(dxPx, dyPx) / dp
-        val accel = (0.9f + min(dist / 12f, 1.8f)) * pointerSpeed
-        val dx = dxPx / scale * accel
-        val dy = dyPx / scale * accel
-        val nx = (cursorX + dx).coerceIn(0f, videoW - 1f)
-        val ny = (cursorY + dy).coerceIn(0f, videoH - 1f)
-        conn()?.mouseRel((nx - cursorX) / videoW, (ny - cursorY) / videoH)
-        onThisScreen = true
-        cursorX = nx
-        cursorY = ny
-        lastLocalMove = SystemClock.uptimeMillis()
+        // Slow finger = finer than 1:1 for precise aiming, fast finger = bigger jumps. Based on
+        // speed, not distance per touch event, so it feels the same on 60 Hz and 240 Hz screens.
+        if (dtMs > 0) speed = speed * 0.6f + hypot(dxPx, dyPx) / dp / dtMs * 0.4f
+        val accel = (0.6f + min(speed * 1.5f, 2.1f)) * pointerSpeed
+        // Zooming in makes it finer still.
+        sendPointer(cursorX + dxPx / scale * accel, cursorY + dyPx / scale * accel)
         follow()
-        invalidate()
+    }
+
+    private fun hold(x: Float, y: Float, t: Long) {
+        if (heldCount == heldX.size) applyHeld(1)
+        heldX[heldCount] = x; heldY[heldCount] = y; heldT[heldCount] = t
+        heldCount++
+    }
+
+    /** Applies the first [n] held samples to the drag. */
+    private fun applyHeld(n: Int) {
+        for (i in 0 until n) {
+            when (drag) {
+                Drag.ABSOLUTE -> {
+                    if (grabbed) moveAbsTo(heldX[i] + grabDx, heldY[i] + grabDy) else moveAbsTo(heldX[i], heldY[i])
+                    follow()
+                }
+                Drag.RELATIVE -> moveRel(heldX[i] - lastX, heldY[i] - lastY, heldT[i] - lastT)
+                Drag.NONE -> {}
+            }
+            lastX = heldX[i]; lastY = heldY[i]; lastT = heldT[i]
+        }
+        heldX.copyInto(heldX, 0, n, heldCount)
+        heldY.copyInto(heldY, 0, n, heldCount)
+        heldT.copyInto(heldT, 0, n, heldCount)
+        heldCount -= n
+    }
+
+    /** Finger lifted: drop held samples if they're just the lifting slide, else finish the move. */
+    private fun finishHeld() {
+        removeCallbacks(flushHeld)
+        if (heldCount == 0) return
+        val i = heldCount - 1
+        if (hypot(heldX[i] - lastX, heldY[i] - lastY) < 6 * dp) heldCount = 0 else applyHeld(heldCount)
     }
 
     private fun nearPointer(x: Float, y: Float): Boolean {
@@ -403,8 +453,10 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
     override fun onTouchEvent(e: MotionEvent): Boolean {
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                downX = e.x; downY = e.y; lastX = e.x; lastY = e.y
+                downX = e.x; downY = e.y; lastX = e.x; lastY = e.y; lastT = e.eventTime
                 downTime = SystemClock.uptimeMillis()
+                heldCount = 0; speed = 0f
+                removeCallbacks(flushHeld)
                 moved = false; longPressed = false; multi = false; dragging = false
                 drag = Drag.NONE; grabbed = false
                 two = Two.NONE
@@ -428,6 +480,8 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
 
             MotionEvent.ACTION_POINTER_DOWN -> {
                 removeCallbacks(longPress)
+                removeCallbacks(flushHeld)
+                heldCount = 0
                 if (dragging) {
                     conn()?.button(0, false)
                     dragging = false
@@ -455,17 +509,19 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
                     }
                 }
                 if (moved && !longPressed) {
-                    when (drag) {
-                        Drag.ABSOLUTE -> {
-                            if (grabbed) moveAbsTo(e.x + grabDx, e.y + grabDy) else moveAbsTo(e.x, e.y)
-                            follow()
-                        }
-                        Drag.RELATIVE -> moveRel(e.x - lastX, e.y - lastY)
-                        Drag.NONE -> {}
-                    }
+                    for (h in 0 until e.historySize) hold(e.getHistoricalX(h), e.getHistoricalY(h), e.getHistoricalEventTime(h))
+                    hold(e.x, e.y, e.eventTime)
+                    // Apply everything except the last 25 ms. If the finger stops, the rest
+                    // follows shortly after; a lift comes first only for the sliding samples.
+                    var n = 0
+                    while (n < heldCount && heldT[n] <= e.eventTime - 25) n++
+                    applyHeld(n)
+                    removeCallbacks(flushHeld)
+                    postDelayed(flushHeld, 50)
                     startEdgePan()
+                } else {
+                    lastX = e.x; lastY = e.y; lastT = e.eventTime
                 }
-                lastX = e.x; lastY = e.y
             }
 
             MotionEvent.ACTION_POINTER_UP -> {
@@ -479,6 +535,7 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
 
             MotionEvent.ACTION_UP -> {
                 removeCallbacks(longPress)
+                finishHeld()
                 fingerDown = false
                 postDelayed(resync, 400)
                 val now = SystemClock.uptimeMillis()
@@ -500,6 +557,8 @@ class RemoteView(context: Context, private val conn: () -> Connection?) :
 
             MotionEvent.ACTION_CANCEL -> {
                 removeCallbacks(longPress)
+                removeCallbacks(flushHeld)
+                heldCount = 0
                 fingerDown = false
                 postDelayed(resync, 400)
                 if (dragging) conn()?.button(0, false)

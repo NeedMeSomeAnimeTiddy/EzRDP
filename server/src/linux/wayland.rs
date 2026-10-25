@@ -236,8 +236,9 @@ impl Portal {
     /// Moves to 0..1 fractions of a screen.
     pub fn move_abs(&self, m: &Monitor, fx: f32, fy: f32) {
         if let Some(s) = self.screen(m) {
-            let x = fx.clamp(0.0, 1.0) as f64 * (s.w - 1).max(1) as f64;
-            let y = fy.clamp(0.0, 1.0) as f64 * (s.h - 1).max(1) as f64;
+            // Same scale the pointer is reported back in (pixel / size).
+            let x = (fx.clamp(0.0, 1.0) as f64 * s.w as f64).min((s.w - 1).max(0) as f64);
+            let y = (fy.clamp(0.0, 1.0) as f64 * s.h as f64).min((s.h - 1).max(0) as f64);
             self.cmd(Cmd::Motion { node: s.node, x, y });
         }
     }
