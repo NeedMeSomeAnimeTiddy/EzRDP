@@ -123,8 +123,16 @@ pub fn run(stream: TcpStream, login: Login, info: Vec<u8>, _app: Arc<crate::stat
     input.release_all();
     shared.stop.store(true, Relaxed);
     let _ = stream.shutdown(Shutdown::Both);
-    let _ = video.join();
-    let _ = audio.join();
+    // These all stop within a second or two. If one never does, the next phone gets no
+    // picture or can't connect at all, so start afresh instead.
+    {
+        let _w = crate::watchdog::Watch::new("the picture sender", Duration::from_secs(30));
+        let _ = video.join();
+    }
+    {
+        let _w = crate::watchdog::Watch::new("the sound sender", Duration::from_secs(30));
+        let _ = audio.join();
+    }
     let _ = pinger.join();
     {
         let mut cur = CURRENT.lock().unwrap();

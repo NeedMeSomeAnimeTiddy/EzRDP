@@ -18,6 +18,7 @@ mod stun;
 mod trust;
 mod update;
 mod upnp;
+mod watchdog;
 
 #[cfg(windows)]
 mod audio;
@@ -484,7 +485,9 @@ fn main() {
     }
     // Started by the old version after it downloaded this one: ask the running copy to quit.
     let updated = arg == "--updated";
-    if updated {
+    // Started by a copy that got stuck (see watchdog.rs): take over from it the same way.
+    let taking_over = updated || arg == "--restarted";
+    if taking_over {
         if let Ok(mut conn) = std::os::unix::net::UnixStream::connect(instance_socket()) {
             use std::io::Write;
             let _ = conn.write_all(b"q");
@@ -498,7 +501,7 @@ fn main() {
     }
     // Already running? Ask it to open its window (not for --background) and stop here.
     if let Ok(mut conn) = std::os::unix::net::UnixStream::connect(instance_socket()) {
-        if arg != "--background" && !updated {
+        if arg != "--background" && !taking_over {
             use std::io::Write;
             let _ = conn.write_all(b"w");
         }
@@ -513,6 +516,9 @@ fn main() {
             (None, Some(e))
         }
     };
+    if let Some(app) = &app {
+        watchdog::start(app.port);
+    }
     let cfg = load_config();
     update::AUTO.store(cfg.auto_update, std::sync::atomic::Ordering::Relaxed);
     if updated {
@@ -522,7 +528,7 @@ fn main() {
         update::run_auto(app.clone(), notify_linux);
     }
     tray::run(app, problem);
-    if arg != "--background" && !updated {
+    if arg != "--background" && !taking_over {
         open_window();
     }
     // The tray menu's Quit (or Ctrl+C) ends EzRDP.
@@ -635,8 +641,10 @@ fn main() {
     let admin_on = std::env::args().any(|a| a == "--admin-on");
     // Started by the old version after it downloaded this one: take over from it.
     let updated = std::env::args().any(|a| a == "--updated");
+    // Started by a copy that got stuck (see watchdog.rs): take over from it the same way.
+    let restarted = std::env::args().any(|a| a == "--restarted");
     // Started with Windows: just the tray, no window.
-    let background = admin_on || updated || std::env::args().any(|a| a == "--background");
+    let background = admin_on || updated || restarted || std::env::args().any(|a| a == "--background");
 
     unsafe {
         let mutex = CreateMutexW(None, true, w!("Local\\EzRDP"));
@@ -644,7 +652,7 @@ fn main() {
             // This same program is already in the tray: just open the window. Unless this copy was
             // started as administrator: then it replaces the normal one, so admin windows can be
             // controlled too.
-            if !updated && running_is_this_program() && !input::elevated() {
+            if !updated && !restarted && running_is_this_program() && !input::elevated() {
                 if !background {
                     open_window();
                 }
@@ -690,6 +698,7 @@ fn main() {
     }
     let app = new_app(&cfg);
     *app.on_change.lock().unwrap() = Some(Box::new(tray::refresh));
+    watchdog::start(app.port);
     if updated {
         update::finished();
     }
