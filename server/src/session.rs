@@ -34,11 +34,37 @@ pub struct Shared {
     phone_name: String,
     /// When the phone was last told an admin window is blocking input.
     admin_notice: Mutex<Option<Instant>>,
+    /// What the video thread is doing (an index into `STAGES`), for the log if it gets stuck.
+    stage: AtomicU8,
+    /// Pictures sent to the phone so far.
+    frames: AtomicU32,
 }
+
+const STAGES: [&str; 6] = [
+    "starting",
+    "opening screen capture",
+    "opening the video encoder",
+    "waiting for the screen",
+    "encoding",
+    "sending to the phone",
+];
+const OPENING_CAPTURE: u8 = 1;
+const OPENING_ENCODER: u8 = 2;
+const WAITING: u8 = 3;
+const ENCODING: u8 = 4;
+const SENDING: u8 = 5;
 
 impl Shared {
     pub fn stopped(&self) -> bool {
         self.stop.load(Relaxed)
+    }
+
+    fn set_stage(&self, stage: u8) {
+        self.stage.store(stage, Relaxed);
+    }
+
+    fn stage(&self) -> &'static str {
+        STAGES[self.stage.load(Relaxed) as usize]
     }
 }
 
@@ -85,8 +111,14 @@ pub fn run(stream: TcpStream, login: Login, info: Vec<u8>, _app: Arc<crate::stat
     let pinger = {
         let (tx, shared) = (tx.clone(), shared.clone());
         std::thread::spawn(move || {
+            let started = Instant::now();
+            let mut warned = false;
             while !shared.stopped() && tx.send(S_PING, &[]).is_ok() {
                 std::thread::sleep(Duration::from_secs(2));
+                if !warned && started.elapsed() > Duration::from_secs(15) && shared.frames.load(Relaxed) == 0 {
+                    warned = true;
+                    crate::log!("No picture 15 seconds after connecting (video: {})", shared.stage());
+                }
             }
         })
     };
@@ -116,21 +148,34 @@ pub fn run(stream: TcpStream, login: Login, info: Vec<u8>, _app: Arc<crate::stat
 
     let mut input = Input::new();
     let mut reader = Receiver::new(std::io::BufReader::new(stream.try_clone().unwrap()), login.rx);
-    while !shared.stopped() {
-        let Ok((kind, body)) = reader.read() else { break };
-        handle(kind, &body, &shared, &mut input, &tx);
-    }
+    let why = loop {
+        if shared.stopped() {
+            break "stopped".to_string();
+        }
+        match reader.read() {
+            Ok((kind, body)) => handle(kind, &body, &shared, &mut input, &tx),
+            Err(e) => {
+                break match e.kind() {
+                    std::io::ErrorKind::UnexpectedEof => "phone hung up".to_string(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => "phone went quiet".to_string(),
+                    _ => e.to_string(),
+                };
+            }
+        }
+    };
+    crate::log!("Session ended ({why}) after {} pictures; video was {}", shared.frames.load(Relaxed), shared.stage());
     input.release_all();
     shared.stop.store(true, Relaxed);
     let _ = stream.shutdown(Shutdown::Both);
     // These all stop within a second or two. If one never does, the next phone gets no
     // picture or can't connect at all, so start afresh instead.
     {
-        let _w = crate::watchdog::Watch::new("the picture sender", Duration::from_secs(30));
+        let s = shared.clone();
+        let _w = crate::watchdog::Watch::new(move || format!("the picture sender ({})", s.stage()), Duration::from_secs(30));
         let _ = video.join();
     }
     {
-        let _w = crate::watchdog::Watch::new("the sound sender", Duration::from_secs(30));
+        let _w = crate::watchdog::Watch::new(|| "the sound sender".into(), Duration::from_secs(30));
         let _ = audio.join();
     }
     let _ = pinger.join();
@@ -166,6 +211,8 @@ fn new_shared(login: &Login) -> Arc<Shared> {
         hw_encoder: AtomicBool::new(login.hw_encoder),
         phone_name: login.device_name.clone(),
         admin_notice: Mutex::new(None),
+        stage: AtomicU8::new(0),
+        frames: AtomicU32::new(0),
     })
 }
 
@@ -348,6 +395,7 @@ fn video_loop(tx: &Sender, shared: &Shared) {
         if shared.monitor.load(Relaxed) as usize >= count && count > 0 {
             shared.monitor.store(0, Relaxed);
         }
+        shared.set_stage(OPENING_CAPTURE);
         let mut cap = match Source::open(shared.monitor.load(Relaxed) as usize) {
             Ok(c) => c,
             Err(e) => {
@@ -372,6 +420,7 @@ fn video_loop(tx: &Sender, shared: &Shared) {
         crate::overlay::show(&shared.phone_name, &m, end_from_banner);
         let scale = pick_scale(&m, q, shared.max_size);
         let (vw, vh) = out_size(m.w as usize, m.h as usize, scale);
+        shared.set_stage(OPENING_ENCODER);
         let mut enc = match Video::open(vw, vh, q, shared.hw_encoder.load(Relaxed)) {
             Ok(e) => e,
             Err(e) => {
@@ -382,6 +431,7 @@ fn video_loop(tx: &Sender, shared: &Shared) {
         let mut cfg = vec![index];
         cfg.extend_from_slice(&(vw as u16).to_be_bytes());
         cfg.extend_from_slice(&(vh as u16).to_be_bytes());
+        shared.set_stage(SENDING);
         if tx.send(S_VIDEO_CONFIG, &cfg).is_err() {
             break;
         }
@@ -404,6 +454,7 @@ fn video_loop(tx: &Sender, shared: &Shared) {
         let mut empty_in_row = 0u32;
 
         while !shared.stopped() && shared.generation.load(Relaxed) == generation {
+            shared.set_stage(WAITING);
             match cap.frame(8, &mut yuv, scale) {
                 Ok(true) => {
                     have_image = true;
@@ -432,6 +483,7 @@ fn video_loop(tx: &Sender, shared: &Shared) {
                 let mut p = x.to_be_bytes().to_vec();
                 p.extend_from_slice(&y.to_be_bytes());
                 p.push(cur.is_some() as u8);
+                shared.set_stage(SENDING);
                 if tx.send(S_CURSOR, &p).is_err() {
                     break 'outer;
                 }
@@ -469,6 +521,7 @@ fn video_loop(tx: &Sender, shared: &Shared) {
             }
             need_send = false;
             last_sent = Instant::now();
+            shared.set_stage(ENCODING);
             match enc.encode(&yuv) {
                 Ok(Some((data, key))) => {
                     empty_in_row = 0;
@@ -476,9 +529,11 @@ fn video_loop(tx: &Sender, shared: &Shared) {
                     frame_id = frame_id.wrapping_add(1);
                     let mut head = frame_id.to_be_bytes().to_vec();
                     head.push(key as u8);
+                    shared.set_stage(SENDING);
                     if tx.send_parts(S_VIDEO_FRAME, &head, data).is_err() {
                         break 'outer;
                     }
+                    shared.frames.fetch_add(1, Relaxed);
                 }
                 Ok(None) => {
                     need_send = true; // skipped to save bandwidth, or still busy; try again

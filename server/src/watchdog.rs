@@ -32,7 +32,7 @@ pub fn start(port: u16) {
                 Ok(()) => failed = 0,
                 Err(e) => {
                     failed += 1;
-                    crate::log!("Self-check: the port didn't answer ({e})");
+                    crate::log!("Self-check: the port didn't answer ({e}); {}", crate::server::status());
                     if failed >= 2 {
                         restart("the port stopped answering");
                         failed = 0;
@@ -79,13 +79,14 @@ pub fn restart(why: &str) {
 pub struct Watch(Arc<AtomicBool>);
 
 impl Watch {
-    pub fn new(what: &'static str, limit: Duration) -> Self {
+    /// `what` says what was stuck, worked out when the time is up.
+    pub fn new(what: impl Fn() -> String + Send + 'static, limit: Duration) -> Self {
         let done = Arc::new(AtomicBool::new(false));
         let flag = done.clone();
         std::thread::spawn(move || {
             std::thread::sleep(limit);
             if !flag.load(Relaxed) {
-                restart(&format!("{what} was still stuck after {} seconds", limit.as_secs()));
+                restart(&format!("{} was still stuck after {} seconds", what(), limit.as_secs()));
             }
         });
         Watch(done)
