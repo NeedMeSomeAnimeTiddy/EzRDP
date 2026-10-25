@@ -22,7 +22,12 @@ class VideoDecoder(private val requestKeyframe: () -> Unit) {
     private var startedAt = 0L
     private var fed = 0
     @Volatile private var shown = 0
+    /** Frames fed in since the last picture came out; many in a row means the decoder stalled. */
+    @Volatile private var sinceOutput = 0
     private var stuckReported = false
+    /** The decoder can't go on without a full picture (keyframe) and hasn't had one yet. */
+    @Volatile var needsKeyframe = true
+        private set
 
     /** Called (on the decoder's thread) when the first picture of a stream is on screen. */
     var onPicture: () -> Unit = {}
@@ -48,7 +53,7 @@ class VideoDecoder(private val requestKeyframe: () -> Unit) {
 
     @Synchronized
     fun decode(data: ByteArray, offset: Int, length: Int, keyframe: Boolean, retry: Boolean = true) {
-        val s = surface ?: return
+        val s = surface ?: return askForKeyframe()
         if (codec == null) {
             if (!keyframe || width == 0) {
                 askForKeyframe()
@@ -57,6 +62,13 @@ class VideoDecoder(private val requestKeyframe: () -> Unit) {
             codec = start(s, data, offset, length) ?: return
         }
         val c = codec ?: return
+        if (shown > 0 && sinceOutput > 45) {
+            // Pictures go in but none come out any more: start the decoder again.
+            Log.w(TAG, "decoder stopped giving pictures; restarting it")
+            release()
+            askForKeyframe()
+            return
+        }
         if (length > inputSize && retry) {
             // Frame bigger than the decoder's buffers (sharp keyframes can be): restart bigger.
             Log.i(TAG, "frame of $length bytes; restarting decoder with bigger buffers")
@@ -100,6 +112,8 @@ class VideoDecoder(private val requestKeyframe: () -> Unit) {
             buf.put(data, offset, length)
             c.queueInputBuffer(index, 0, length, System.nanoTime() / 1000, 0)
             fed++
+            sinceOutput++
+            if (keyframe) needsKeyframe = false
         } catch (e: Exception) {
             Log.w(TAG, "decode failed, restarting decoder", e)
             release()
@@ -108,6 +122,7 @@ class VideoDecoder(private val requestKeyframe: () -> Unit) {
     }
 
     private fun askForKeyframe() {
+        needsKeyframe = true
         val now = System.currentTimeMillis()
         if (now - lastKeyRequest > 500) {
             lastKeyRequest = now
@@ -146,6 +161,7 @@ class VideoDecoder(private val requestKeyframe: () -> Unit) {
         inputSize = maxOf(inputSize, width * height * 2, length * 2, 1 shl 20)
         fed = 0
         shown = 0
+        sinceOutput = 0
         startedAt = System.currentTimeMillis()
         // Some phones refuse the low-latency settings; fall back to plain decoding.
         for (lowLatency in listOf(true, false)) {
@@ -173,6 +189,7 @@ class VideoDecoder(private val requestKeyframe: () -> Unit) {
                 val index = c.dequeueOutputBuffer(info, 20_000)
                 if (index >= 0) {
                     c.releaseOutputBuffer(index, true)
+                    sinceOutput = 0
                     if (shown++ == 0) onPicture()
                 }
             }
@@ -190,6 +207,7 @@ class VideoDecoder(private val requestKeyframe: () -> Unit) {
             try { it.release() } catch (_: Exception) {}
         }
         codec = null
+        needsKeyframe = true
     }
 
     private class Nal(val start: Int, val end: Int, val type: Int)

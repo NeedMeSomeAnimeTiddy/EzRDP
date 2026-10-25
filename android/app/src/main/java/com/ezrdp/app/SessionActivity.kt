@@ -58,6 +58,17 @@ class SessionActivity : Activity() {
     }
     private val audio = AudioPlayer()
 
+    /** Until the decoder has a full picture, keep asking the PC for one. A single request can get
+     *  lost, and the PC sends nothing new while its screen is still, so the phone would stay on
+     *  "Waiting for picture" (or a frozen picture) until something on the PC changed. */
+    private val keyframeTicker = object : Runnable {
+        override fun run() {
+            val c = conn ?: return
+            if (decoder.needsKeyframe) c.requestKeyframe()
+            ui.postDelayed(this, 1000)
+        }
+    }
+
     private lateinit var store: PcStore
     private lateinit var pc: SavedPc
     private var liveHost: String? = null
@@ -527,6 +538,8 @@ class SessionActivity : Activity() {
                         showStatus(if (pictureShown) null else "Waiting for picture…")
                         if (soundOn) c.setAudio(true)
                         chosenMonitor?.let { c.selectMonitor(it) }
+                        ui.removeCallbacks(keyframeTicker)
+                        ui.postDelayed(keyframeTicker, 1000)
                     }
                     return@Thread
                 } catch (e: Exception) {

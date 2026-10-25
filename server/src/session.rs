@@ -452,6 +452,8 @@ fn video_loop(tx: &Sender, shared: &Shared) {
         let mut sent = 0u32;
         // Graphics-card encoders that stop giving pictures get swapped for the software one.
         let mut empty_in_row = 0u32;
+        // Pictures sent since the phone asked for a full one without it coming (None = not asked).
+        let mut want_key: Option<u32> = None;
 
         while !shared.stopped() && shared.generation.load(Relaxed) == generation {
             shared.set_stage(WAITING);
@@ -508,6 +510,7 @@ fn video_loop(tx: &Sender, shared: &Shared) {
             }
 
             if shared.keyframe.swap(false, Relaxed) {
+                want_key = want_key.or(Some(0)); // repeated asks keep counting
                 enc.force_keyframe();
                 need_send = have_image;
             }
@@ -522,9 +525,18 @@ fn video_loop(tx: &Sender, shared: &Shared) {
             need_send = false;
             last_sent = Instant::now();
             shared.set_stage(ENCODING);
+            let hard = matches!(enc, Video::Hard(_));
             match enc.encode(&yuv) {
+                // A picture already on its way may come out first, so allow a couple.
+                Ok(Some((_, false))) if hard && want_key.is_some_and(|n| n >= 2) => {
+                    // Some graphics-card encoders ignore "full picture now". Without one the phone
+                    // can't show anything, so start a fresh encoder: its first picture is a full one.
+                    crate::log!("Video: encoder ignored a request for a full picture; restarting it");
+                    continue 'outer;
+                }
                 Ok(Some((data, key))) => {
                     empty_in_row = 0;
+                    want_key = if key { None } else { want_key.map(|n| n + 1) };
                     sent += 1;
                     frame_id = frame_id.wrapping_add(1);
                     let mut head = frame_id.to_be_bytes().to_vec();
