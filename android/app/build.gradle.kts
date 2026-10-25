@@ -18,10 +18,13 @@ android {
         versionName = "1.1.$build"
     }
 
+    // One fixed key, so every build installs as an update over the last one. It is kept out of
+    // the repo: GitHub's build writes it from the EZRDP_KEYSTORE_BASE64 secret; for a build on
+    // your own computer, put the file at android/app/ezrdp.keystore.
+    val keystore = file("ezrdp.keystore")
     signingConfigs {
-        // One fixed key kept with the project, so every build can update the last one.
         create("ezrdp") {
-            storeFile = file("ezrdp.keystore")
+            storeFile = keystore
             storePassword = "android"
             keyAlias = "androiddebugkey"
             keyPassword = "android"
@@ -31,10 +34,10 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("ezrdp")
+            if (keystore.exists()) signingConfig = signingConfigs.getByName("ezrdp")
         }
         debug {
-            signingConfig = signingConfigs.getByName("ezrdp")
+            if (keystore.exists()) signingConfig = signingConfigs.getByName("ezrdp")
         }
     }
 

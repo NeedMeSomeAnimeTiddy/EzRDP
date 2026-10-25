@@ -210,4 +210,6 @@ home. People with a DDNS name can set it per PC: long-press the PC in the app â†
 - PC: install Rust, then `cd server && cargo build --release` (Windows or Linux; on Linux install
   `libasound2-dev libpipewire-0.3-dev clang` first)
 - Android: `cd android && ./gradlew assembleRelease` (needs the Android SDK). Builds are signed with
-  `android/app/ezrdp.keystore` so every new APK installs as an update over the last one.
+  `android/app/ezrdp.keystore` so every new APK installs as an update over the last one. That key is
+  private and not in the repo: GitHub's build gets it from the `EZRDP_KEYSTORE_BASE64` secret. Without
+  it, a build still works but can't update an app installed from the official build.

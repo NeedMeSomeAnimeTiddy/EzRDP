@@ -51,6 +51,16 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+      - name: Signing key
+        working-directory: android
+        env:
+          KEYSTORE: ${{ secrets.EZRDP_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE" ]; then
+            echo "::error::Add the EZRDP_KEYSTORE_BASE64 secret (Settings > Secrets and variables > Actions) so the app can install as an update."
+            exit 1
+          fi
+          echo "$KEYSTORE" | base64 -d > app/ezrdp.keystore
       - name: Build APK
         working-directory: android
         run: |

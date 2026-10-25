@@ -3,3 +3,7 @@ build/
 local.properties
 *.iml
 .idea/
+
+# The app signing key: never commit it (see android/app/build.gradle.kts).
+*.keystore
+.kotlin/
