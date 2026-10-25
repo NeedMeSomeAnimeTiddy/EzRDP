@@ -413,6 +413,11 @@ pub fn admin_window_in_front() -> bool {
     false
 }
 
+/// Windows only: its lock screen and security prompts can't be shown or controlled.
+pub fn security_prompt() -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

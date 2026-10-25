@@ -4,7 +4,7 @@ use crate::capture::{CapError, Monitor, Source, monitors};
 use crate::convert::{Yuv, out_size};
 use crate::encoder::{H264, Quality, quality, scale_for};
 use crate::hwenc::HwEncoder;
-use crate::input::{Input, admin_window_in_front, cursor, wake_displays};
+use crate::input::{Input, admin_window_in_front, cursor, security_prompt, wake_displays};
 use crate::protocol::*;
 use crate::login::Login;
 use std::net::{Shutdown, TcpStream};
@@ -14,6 +14,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 #[cfg(windows)]
 use windows::Win32::System::Power::*;
+
+const SECURITY_PROMPT_NOTICE: &str = "The PC is showing a Windows security screen: the lock screen, an \
+    \"allow changes?\" prompt, or a Windows Security / Windows Hello prompt.\n\n\
+    Windows doesn't let any app show or control these, so the picture is paused and taps do nothing. \
+    It has to be answered at the PC. The picture comes back once it's gone.";
 
 /// Frames sent but not yet confirmed by the phone. Keeping this small stops lag from piling up.
 const MAX_IN_FLIGHT: u32 = 3;
@@ -113,8 +118,16 @@ pub fn run(stream: TcpStream, login: Login, info: Vec<u8>, _app: Arc<crate::stat
         std::thread::spawn(move || {
             let started = Instant::now();
             let mut warned = false;
+            let mut prompt = false;
             while !shared.stopped() && tx.send(S_PING, &[]).is_ok() {
                 std::thread::sleep(Duration::from_secs(2));
+                // Say once per prompt why the picture stopped and taps do nothing.
+                let now = security_prompt();
+                if now && !prompt {
+                    crate::log!("A Windows security screen is up: the phone can't see or control it");
+                    let _ = tx.send(S_NOTICE, SECURITY_PROMPT_NOTICE.as_bytes());
+                }
+                prompt = now;
                 if !warned && started.elapsed() > Duration::from_secs(15) && shared.frames.load(Relaxed) == 0 {
                     warned = true;
                     crate::log!("No picture 15 seconds after connecting (video: {})", shared.stage());

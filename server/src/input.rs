@@ -467,6 +467,54 @@ pub fn admin_window_in_front() -> bool {
     }
 }
 
+/// Windows is showing one of its protected screens that no program may see or control: the
+/// lock screen, an "allow changes?" (UAC) prompt, or a Windows Security / Windows Hello prompt.
+pub fn security_prompt() -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::StationsAndDesktops::*;
+    use windows::Win32::System::Threading::*;
+    unsafe {
+        // The lock screen and UAC prompts switch to a separate desktop ("Winlogon"), which
+        // normal programs can't even open.
+        let Ok(desk) = OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS) else {
+            return true;
+        };
+        let mut name = [0u16; 64];
+        let mut len = 0u32;
+        let got = GetUserObjectInformationW(
+            windows::Win32::Foundation::HANDLE(desk.0),
+            UOI_NAME,
+            Some(name.as_mut_ptr() as *mut _),
+            (name.len() * 2) as u32,
+            Some(&mut len),
+        )
+        .is_ok();
+        let _ = CloseDesktop(desk);
+        if got && !String::from_utf16_lossy(&name).trim_end_matches('\0').eq_ignore_ascii_case("Default") {
+            return true;
+        }
+        // Windows Security prompts (Windows Hello, passkeys, saved passwords) stay on the normal
+        // desktop but are protected the same way.
+        let win = GetForegroundWindow();
+        if win.is_invalid() {
+            return false;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(win, Some(&mut pid));
+        let Ok(p) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
+        let mut buf = [0u16; 512];
+        let mut n = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(p, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut n).is_ok();
+        let _ = CloseHandle(p);
+        if !ok {
+            return false;
+        }
+        let path = String::from_utf16_lossy(&buf[..n as usize]).to_lowercase();
+        let exe = path.rsplit('\\').next().unwrap_or("");
+        matches!(exe, "credentialuibroker.exe" | "consent.exe" | "logonui.exe")
+    }
+}
+
 /// A tiny mouse nudge wakes monitors that went to sleep, so the phone isn't stuck on a black screen.
 pub fn wake_displays() {
     send(&[mouse(MOUSEEVENTF_MOVE, 0, 0, 0)]);
