@@ -77,10 +77,49 @@ class SettingsActivity : Activity() {
         toggle("Use the PC's graphics card", s.gpuEncoder) { s.gpuEncoder = it }
         note("Makes the picture faster. Turn off if the picture looks broken or stays black.")
 
+        section("Updates")
+        val status = TextView(this).apply {
+            text = "This app: build ${Updater.currentBuild(this@SettingsActivity)}"
+            textSize = 14f
+            setTextColor(0xFFB8BEC8.toInt())
+            setPadding(dp(2), dp(4), dp(2), dp(4))
+        }
+        col.addView(status)
+        action("Check for updates") { checkForUpdates(status) }
+        toggle("Update automatically", s.autoUpdate) { s.autoUpdate = it }
+        note(
+            "Checks when you open EzRDP (every few hours, never while connected) and installs " +
+                "by itself; the app closes and opens again. The PC app updates from its tray menu."
+        )
+
         setContentView(ScrollView(this).apply {
             setBackgroundColor(0xFF101114.toInt())
             addView(col)
         })
+    }
+
+    private fun checkForUpdates(status: TextView) {
+        status.text = "Checking…"
+        Thread {
+            val text = try {
+                val latest = Updater.check(this)
+                when {
+                    latest == null -> "You have the newest version (build ${Updater.currentBuild(this)})."
+                    !Updater.allowed(this) -> {
+                        runOnUiThread { Updater.askPermission(this) }
+                        "Build ${latest.build} is ready. Allow EzRDP to install updates, then come back and tap Check for updates again."
+                    }
+                    else -> {
+                        runOnUiThread { status.text = "Downloading build ${latest.build}…" }
+                        Updater.install(this, latest)
+                        "Installing build ${latest.build}. EzRDP closes and opens again by itself."
+                    }
+                }
+            } catch (e: Exception) {
+                "Couldn't update: ${e.message ?: "no connection"}"
+            }
+            runOnUiThread { status.text = text }
+        }.start()
     }
 
     private fun section(t: String) = col.addView(TextView(this).apply {

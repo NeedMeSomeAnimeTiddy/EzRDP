@@ -174,6 +174,22 @@ your PC at all; use Tailscale in that case.
 If your home internet address changes, the phone learns the new one the next time it connects at
 home. People with a DDNS name can set it per PC: long-press the PC in the app → Set internet address.
 
+## Updates
+
+Every change merged into `main` is built by GitHub and published as the newest release. Both apps
+update themselves from it:
+
+- **PC:** tray menu → **Check for updates...**, or leave **Update automatically** on. Automatic
+  updates never happen while someone is connected; they wait until you disconnect. EzRDP restarts
+  by itself in a few seconds, and if the new version doesn't start it goes back to the old one
+  (Windows). On Linux, `ezrdp --update` does it from a terminal.
+- **Phone:** Settings → **Check for updates**. The first time, Android asks you to allow EzRDP to
+  install apps. After that (Android 12 and later) updates install with no questions, and the app
+  opens again by itself. With **Update automatically** on, it checks when you open the app.
+
+Downloads are checked against the sha256 in the release's `latest.json`, and Android only accepts
+an update signed with the same key as the installed app.
+
 ## Security
 
 - Pairing only works from the home network, and only after you click Yes on the PC.

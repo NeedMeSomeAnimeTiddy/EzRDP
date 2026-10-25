@@ -94,6 +94,7 @@ class MainActivity : Activity() {
         found.clear()
         render()
         discovery.start()
+        Updater.autoCheck(this)
     }
 
     override fun onPause() {

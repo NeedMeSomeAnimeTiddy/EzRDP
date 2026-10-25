@@ -137,7 +137,7 @@ impl ksni::Tray for Tray {
                         label(format!("Home address: {home}")),
                         label(format!("Internet address: {net}")),
                         label(format!("Port: {}", app.port)),
-                        label(format!("EzRDP version {}", crate::protocol::VERSION)),
+                        label(format!("EzRDP build {} (protocol {})", crate::update::BUILD, crate::protocol::VERSION)),
                     ],
                     ..Default::default()
                 }
@@ -149,6 +149,27 @@ impl ksni::Tray for Tray {
                 label: "Start when I sign in".into(),
                 checked: crate::linux_autostart_enabled(),
                 activate: Box::new(|_: &mut Self| crate::linux_autostart(!crate::linux_autostart_enabled())),
+                ..Default::default()
+            }
+            .into(),
+        );
+        menu.push(item("Check for updates", |_: &mut Self| {
+            std::thread::spawn(|| match crate::update::check() {
+                Ok(None) => crate::notify_linux("Up to date", &format!("You have the newest version (build {}).", crate::update::BUILD)),
+                Ok(Some(latest)) => {
+                    crate::notify_linux("Updating", &format!("Installing build {}. EzRDP restarts by itself.", latest.build));
+                    if let Err(e) = crate::update::install(&latest) {
+                        crate::notify_linux("Couldn't update", &e);
+                    }
+                }
+                Err(e) => crate::notify_linux("Couldn't check for updates", &e),
+            });
+        }));
+        menu.push(
+            CheckmarkItem {
+                label: "Update automatically".into(),
+                checked: crate::update::AUTO.load(Relaxed),
+                activate: Box::new(|_: &mut Self| crate::set_auto_update(!crate::update::AUTO.load(Relaxed))),
                 ..Default::default()
             }
             .into(),

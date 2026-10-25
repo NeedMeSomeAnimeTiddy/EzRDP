@@ -16,6 +16,7 @@ mod server;
 mod state;
 mod stun;
 mod trust;
+mod update;
 mod upnp;
 
 #[cfg(windows)]
@@ -82,6 +83,8 @@ struct Config {
     name: String,
     /// Set after the first run, so "Start with Windows" is only switched on once.
     first_run_done: bool,
+    /// Install updates by themselves.
+    auto_update: bool,
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -130,6 +133,7 @@ fn load_config() -> Config {
         pc_id: [0; 16],
         name: String::new(),
         first_run_done: false,
+        auto_update: true,
     };
     let mut id = None;
     for line in text.lines() {
@@ -141,6 +145,7 @@ fn load_config() -> Config {
                 "id" => id = trust::unhex::<16>(v),
                 "name" => cfg.name = v.to_string(),
                 "first_run_done" => cfg.first_run_done = v == "yes",
+                "auto_update" => cfg.auto_update = !matches!(v, "off" | "no" | "false" | "0"),
                 _ => {}
             }
         }
@@ -154,9 +159,6 @@ fn load_config() -> Config {
     if incomplete {
         save_config(&cfg);
     }
-    if cfg.name.is_empty() {
-        cfg.name = computer_name();
-    }
     cfg
 }
 
@@ -168,21 +170,32 @@ fn save_config(cfg: &Config) {
          internet={}\n\
          # Name shown on the phone (blank = this PC's name).\n\
          name={}\n\
+         # auto_update=on installs new versions by itself (never while someone is connected).\n\
+         auto_update={}\n\
          # Don't change these.\n\
          id={}\n\
          first_run_done=yes\n",
         cfg.port,
         if cfg.internet { "on" } else { "off" },
         cfg.name,
+        if cfg.auto_update { "on" } else { "off" },
         trust::hex(&cfg.pc_id)
     );
     let _ = std::fs::write(data_path("ezrdp.conf"), body);
 }
 
+/// Turns automatic updates on or off, and remembers it.
+pub fn set_auto_update(on: bool) {
+    let mut cfg = load_config();
+    cfg.auto_update = on;
+    save_config(&cfg);
+    update::AUTO.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn new_app(cfg: &Config) -> Arc<App> {
     Arc::new(App {
         pc_id: cfg.pc_id,
-        pc_name: cfg.name.clone(),
+        pc_name: if cfg.name.is_empty() { computer_name() } else { cfg.name.clone() },
         port: cfg.port,
         paused: AtomicBool::new(false),
         trusted: Mutex::new(trust::Trusted::load(data_path("trusted.txt"))),
@@ -380,6 +393,15 @@ fn linux_host() -> Result<Arc<App>, String> {
     Ok(app)
 }
 
+/// A desktop notification (if notify-send is installed).
+#[cfg(target_os = "linux")]
+pub fn notify_linux(title: &str, text: &str) {
+    let _ = std::process::Command::new("notify-send")
+        .args([&format!("EzRDP: {title}"), text])
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 /// Where a running EzRDP listens for "open your window" from a second start.
 #[cfg(target_os = "linux")]
 fn instance_socket() -> PathBuf {
@@ -397,8 +419,12 @@ fn claim_instance() {
     std::thread::spawn(move || {
         for mut conn in listener.incoming().flatten() {
             let mut b = [0u8; 1];
-            if conn.read_exact(&mut b).is_ok() && b[0] == b'w' {
-                open_window();
+            if conn.read_exact(&mut b).is_ok() {
+                match b[0] {
+                    b'w' => open_window(),
+                    b'q' => std::process::exit(0), // a newer version is taking over
+                    _ => {}
+                }
             }
         }
     });
@@ -428,10 +454,24 @@ fn main() {
                  ezrdp --background       tray icon only (what starting at sign-in uses)\n\
                  ezrdp --window           only the window\n\
                  ezrdp --autostart        let others control this PC from when you sign in\n\
-                 ezrdp --autostart off    undo that\n\n\
+                 ezrdp --autostart off    undo that\n\
+                 ezrdp --update           install the newest version\n\n\
                  Settings and trusted devices: {}",
                 data_path("").display()
             );
+            return;
+        }
+        "--update" => {
+            match update::check() {
+                Ok(None) => println!("You have the newest version (build {}).", update::BUILD),
+                Ok(Some(latest)) => {
+                    println!("Installing build {}...", latest.build);
+                    if let Err(e) = update::install(&latest) {
+                        println!("Couldn't update: {e}");
+                    }
+                }
+                Err(e) => println!("Couldn't check for updates: {e}"),
+            }
             return;
         }
         "--window" => {
@@ -442,9 +482,23 @@ fn main() {
         }
         _ => {}
     }
+    // Started by the old version after it downloaded this one: ask the running copy to quit.
+    let updated = arg == "--updated";
+    if updated {
+        if let Ok(mut conn) = std::os::unix::net::UnixStream::connect(instance_socket()) {
+            use std::io::Write;
+            let _ = conn.write_all(b"q");
+        }
+        for _ in 0..50 {
+            if std::os::unix::net::UnixStream::connect(instance_socket()).is_err() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
     // Already running? Ask it to open its window (not for --background) and stop here.
     if let Ok(mut conn) = std::os::unix::net::UnixStream::connect(instance_socket()) {
-        if arg != "--background" {
+        if arg != "--background" && !updated {
             use std::io::Write;
             let _ = conn.write_all(b"w");
         }
@@ -459,8 +513,16 @@ fn main() {
             (None, Some(e))
         }
     };
+    let cfg = load_config();
+    update::AUTO.store(cfg.auto_update, std::sync::atomic::Ordering::Relaxed);
+    if updated {
+        update::finished();
+    }
+    if let Some(app) = &app {
+        update::run_auto(app.clone(), notify_linux);
+    }
     tray::run(app, problem);
-    if arg != "--background" {
+    if arg != "--background" && !updated {
         open_window();
     }
     // The tray menu's Quit (or Ctrl+C) ends EzRDP.
@@ -571,8 +633,10 @@ fn main() {
     }
     // Started as administrator from the tray menu to turn it on: this copy then takes over.
     let admin_on = std::env::args().any(|a| a == "--admin-on");
+    // Started by the old version after it downloaded this one: take over from it.
+    let updated = std::env::args().any(|a| a == "--updated");
     // Started with Windows: just the tray, no window.
-    let background = admin_on || std::env::args().any(|a| a == "--background");
+    let background = admin_on || updated || std::env::args().any(|a| a == "--background");
 
     unsafe {
         let mutex = CreateMutexW(None, true, w!("Local\\EzRDP"));
@@ -580,7 +644,7 @@ fn main() {
             // This same program is already in the tray: just open the window. Unless this copy was
             // started as administrator: then it replaces the normal one, so admin windows can be
             // controlled too.
-            if running_is_this_program() && !input::elevated() {
+            if !updated && running_is_this_program() && !input::elevated() {
                 if !background {
                     open_window();
                 }
@@ -626,6 +690,11 @@ fn main() {
     }
     let app = new_app(&cfg);
     *app.on_change.lock().unwrap() = Some(Box::new(tray::refresh));
+    if updated {
+        update::finished();
+    }
+    update::AUTO.store(cfg.auto_update, std::sync::atomic::Ordering::Relaxed);
+    update::run_auto(app.clone(), tray::notify);
 
     fn fix_firewall() {
         let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default();

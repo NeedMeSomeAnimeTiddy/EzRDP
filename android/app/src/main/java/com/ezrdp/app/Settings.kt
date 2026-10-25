@@ -58,6 +58,14 @@ class Settings(context: Context) {
         get() = p.getBoolean("gpuEncoder", true)
         set(v) = p.edit().putBoolean("gpuEncoder", v).apply()
 
+    /** Install new versions by themselves (only when the app opens, never mid-session). */
+    var autoUpdate: Boolean
+        get() = p.getBoolean("autoUpdate", true)
+        set(v) = p.edit().putBoolean("autoUpdate", v).apply()
+    var lastUpdateCheck: Long
+        get() = p.getLong("lastUpdateCheck", 0L)
+        set(v) = p.edit().putLong("lastUpdateCheck", v).apply()
+
     companion object {
         const val MODE_BOTH = 0
         const val MODE_TRACKPAD = 1

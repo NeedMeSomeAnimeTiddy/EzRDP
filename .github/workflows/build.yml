@@ -6,9 +6,23 @@ on:
   workflow_dispatch:
 
 jobs:
+  # One build number for all three apps: the apps compare it with the newest release to know
+  # when there's an update. Minutes since Sept 2025, like the phone app's version code.
+  version:
+    name: Build number
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.n.outputs.build }}
+    steps:
+      - id: n
+        run: echo "build=$(( $(date +%s) / 60 - 29270000 ))" >> "$GITHUB_OUTPUT"
+
   pc-server:
     name: PC app (Windows)
+    needs: version
     runs-on: windows-latest
+    env:
+      EZRDP_BUILD: ${{ needs.version.outputs.build }}
     steps:
       - uses: actions/checkout@v4
       - name: Test
@@ -24,7 +38,10 @@ jobs:
 
   pc-server-linux:
     name: PC app (Linux)
+    needs: version
     runs-on: ubuntu-24.04
+    env:
+      EZRDP_BUILD: ${{ needs.version.outputs.build }}
     steps:
       - uses: actions/checkout@v4
       - name: Install libraries
@@ -44,7 +61,10 @@ jobs:
 
   android-app:
     name: Android app
+    needs: version
     runs-on: ubuntu-latest
+    env:
+      EZRDP_BUILD: ${{ needs.version.outputs.build }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -72,18 +92,41 @@ jobs:
           name: EzRDP-Android
           path: android/EzRDP.apk
 
+  # Every push to main becomes the newest download, which the apps update themselves from.
   release:
     name: Publish download
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [pc-server, pc-server-linux, android-app]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    needs: [version, pc-server, pc-server-linux, android-app]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      BUILD: ${{ needs.version.outputs.build }}
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
     steps:
       - uses: actions/download-artifact@v4
+      - name: Update list
+        run: |
+          sum() { sha256sum "$1" | cut -d' ' -f1; }
+          cat > latest.json <<JSON
+          {
+            "build": $BUILD,
+            "windows": { "file": "ezrdp-server.exe", "sha256": "$(sum EzRDP-PC/ezrdp-server.exe)" },
+            "linux": { "file": "ezrdp-linux", "sha256": "$(sum EzRDP-PC-Linux/ezrdp-linux)" },
+            "android": { "file": "EzRDP.apk", "sha256": "$(sum EzRDP-Android/EzRDP.apk)" }
+          }
+          JSON
+          cat latest.json
       - name: Create release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: >
-          gh release create "${{ github.ref_name }}" --repo "${{ github.repository }}" --title "EzRDP ${{ github.ref_name }}"
-          EzRDP-PC/ezrdp-server.exe EzRDP-Android/EzRDP.apk EzRDP-PC-Linux/ezrdp-linux
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then tag="$GITHUB_REF_NAME"; else tag="build-$BUILD"; fi
+          gh release create "$tag" --repo "$REPO" --target "$GITHUB_SHA" --latest --title "EzRDP build $BUILD" \
+            --notes "Automatic build from commit $GITHUB_SHA." \
+            EzRDP-PC/ezrdp-server.exe EzRDP-Android/EzRDP.apk EzRDP-PC-Linux/ezrdp-linux latest.json
+      - name: Remove old builds
+        run: |
+          # Keep the newest 5 automatic builds (tagged versions stay).
+          gh release list --repo "$REPO" --limit 100 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | startswith("build-"))] | sort_by(.createdAt) | reverse | .[5:] | .[].tagName' |
+          while read -r t; do gh release delete "$t" --repo "$REPO" --yes --cleanup-tag; done

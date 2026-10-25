@@ -13,7 +13,9 @@ android {
         targetSdk = 35
         // Goes up with every build (minutes since Sept 2025), so Android offers "Update"
         // instead of treating a new APK as the same app that's already installed.
-        val build = ((System.currentTimeMillis() / 60_000L) - 29_270_000L).toInt()
+        // GitHub's build passes the number in, so the PC app and this one share it.
+        val build = System.getenv("EZRDP_BUILD")?.toIntOrNull()
+            ?: ((System.currentTimeMillis() / 60_000L) - 29_270_000L).toInt()
         versionCode = build
         versionName = "1.1.$build"
     }

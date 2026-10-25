@@ -24,6 +24,8 @@ const ID_FIREWALL: usize = 7;
 const ID_WINDOW: usize = 8;
 const ID_ADMIN: usize = 9;
 const ID_FREE_MOUSE: usize = 10;
+const ID_UPDATE: usize = 11;
+const ID_AUTO_UPDATE: usize = 12;
 const ID_REMOVE_PHONE: usize = 100;
 
 /// Ctrl+Alt+F12 anywhere on the PC frees a mouse that a program left locked.
@@ -210,6 +212,9 @@ fn show_menu(app: &App) {
         add(MF_STRING | if admin { MF_CHECKED } else { MF_UNCHECKED }, ID_ADMIN, "Control admin windows too");
         add(MF_STRING, ID_INFO, "Connection info");
         add(MF_STRING, ID_FREE_MOUSE, "Free the mouse (Ctrl+Alt+F12)");
+        add(MF_STRING, ID_UPDATE, "Check for updates...");
+        let auto = if crate::update::AUTO.load(Relaxed) { MF_CHECKED } else { MF_UNCHECKED };
+        add(MF_STRING | auto, ID_AUTO_UPDATE, "Update automatically");
         if !FIREWALL_OK.load(Relaxed) {
             add(MF_STRING, ID_FIREWALL, "Allow through Windows Firewall...");
         }
@@ -255,6 +260,30 @@ fn admin_windows(on: bool) {
     }
 }
 
+fn check_for_updates() {
+    match crate::update::check() {
+        Ok(None) => {
+            message(&format!("You have the newest version (build {}).", crate::update::BUILD), MB_OK | MB_ICONINFORMATION);
+        }
+        Ok(Some(latest)) => {
+            let q = format!(
+                "A new version is ready (build {}, you have build {}). Install it now?\n\n\
+                 EzRDP restarts by itself in a few seconds. A connected phone reconnects on its own.",
+                latest.build,
+                crate::update::BUILD
+            );
+            if message(&q, MB_YESNO | MB_ICONQUESTION) == IDYES
+                && let Err(e) = crate::update::install(&latest)
+            {
+                message(&format!("Couldn't update: {e}"), MB_OK | MB_ICONERROR);
+            }
+        }
+        Err(e) => {
+            message(&format!("Couldn't check for updates: {e}."), MB_OK | MB_ICONERROR);
+        }
+    }
+}
+
 fn handle(app: &App, cmd: usize, devices: &[crate::trust::Device]) {
     match cmd {
         ID_PAUSE => {
@@ -272,8 +301,9 @@ fn handle(app: &App, cmd: usize, devices: &[crate::trust::Device]) {
             let home = crate::server::lan_ip().map(|i| i.to_string()).unwrap_or("unknown".into());
             let net = app.public_ip.lock().unwrap().map(|i| i.to_string()).unwrap_or("unknown".into());
             let text = format!(
-                "EzRDP version {}\nPC name: {}\nHome address: {home}\nInternet address: {net}\nPort: {}\n{}\nTrusted phones: {}\n\n\
+                "EzRDP build {} (protocol {})\nPC name: {}\nHome address: {home}\nInternet address: {net}\nPort: {}\n{}\nTrusted phones: {}\n\n\
                  Phones don't need any of this: they find the PC by themselves.",
+                crate::update::BUILD,
                 crate::protocol::VERSION,
                 app.pc_name,
                 app.port,
@@ -283,6 +313,11 @@ fn handle(app: &App, cmd: usize, devices: &[crate::trust::Device]) {
             message(&text, MB_OK | MB_ICONINFORMATION);
         }
         ID_FREE_MOUSE => crate::input::free_mouse(),
+        ID_UPDATE => {
+            // Off the tray's thread: checking and downloading take a while.
+            std::thread::spawn(check_for_updates);
+        }
+        ID_AUTO_UPDATE => crate::set_auto_update(!crate::update::AUTO.load(Relaxed)),
         ID_ADD_PHONE => {
             message(
                 "To add a phone:\n\n1. Connect the phone to the same Wi-Fi as this PC.\n2. Open EzRDP on the phone.\n\

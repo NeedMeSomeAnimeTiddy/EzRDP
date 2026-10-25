@@ -57,6 +57,13 @@ pub fn end(reason: u8) {
     });
 }
 
+/// Shows a message on the connected phone, if there is one.
+pub fn notice(text: &str) {
+    if let Some(tx) = CURRENT.lock().unwrap().clone() {
+        let _ = tx.send(S_NOTICE, text.as_bytes());
+    }
+}
+
 /// A phone is controlling this PC right now.
 pub fn active() -> bool {
     CURRENT.lock().unwrap().is_some()
