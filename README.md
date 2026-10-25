@@ -204,7 +204,7 @@ an update signed with the same key as the installed app.
 
 ## Limits
 
-- The PC must be signed in. The Windows lock screen and UAC prompts can't be shown (Windows blocks that for normal apps). The picture comes back when they're gone.
+- The PC must be signed in. The Windows lock screen, "allow changes?" (UAC) prompts and Windows Security / Windows Hello prompts can't be shown or controlled (Windows blocks that for all apps, even with "Control admin windows too" on). The phone says so when one is up; answer it at the PC and the picture comes back.
 - One phone at a time. A new connection takes over from the old one.
 - Clicks and typing always go to the screen the phone is showing (the mouse is moved there first).
 - EzRDP runs as a tray app, not a Windows service: services can't see your screen.
