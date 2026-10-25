@@ -399,6 +399,40 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
 }
 
+/// The PC's own mouse was pressed on the banner and hasn't been let go yet.
+static BANNER_PRESSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Watches the real mouse for clicks on the "… is controlling this PC" banner. The banner lets
+/// clicks through, so the phone's clicks (marked as injected) reach whatever is underneath it.
+unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32 {
+        let m = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+        let injected = m.flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED) != 0;
+        let button = wparam.0 as u32;
+        if !injected {
+            // Only a press and release both on the banner count, so letting go of a drag
+            // that ends over it isn't swallowed.
+            match button {
+                WM_LBUTTONDOWN => {
+                    let on = crate::overlay::on_banner(m.pt.x, m.pt.y);
+                    BANNER_PRESSED.store(on, Relaxed);
+                    if on {
+                        return LRESULT(1);
+                    }
+                }
+                WM_LBUTTONUP if BANNER_PRESSED.swap(false, Relaxed) => {
+                    if crate::overlay::on_banner(m.pt.x, m.pt.y) {
+                        crate::overlay::clicked();
+                    }
+                    return LRESULT(1);
+                }
+                _ => {}
+            }
+        }
+    }
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
 /// Whether Ctrl is held on the PC's real keyboard (keys from the phone don't count).
 static REAL_CTRL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -467,6 +501,8 @@ pub fn run(app: Arc<App>) {
         add_icon(&app);
         // Ctrl+Esc on the PC's own keyboard ends the phone's session.
         let _ = SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_hook), Some(instance), 0);
+        // So does clicking the banner with the PC's own mouse.
+        let _ = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), Some(instance), 0);
         let _ = RegisterHotKey(Some(window), HOTKEY_FREE_MOUSE, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_F12.0 as u32);
         crate::input::watch_for_orphaned_clip();
 

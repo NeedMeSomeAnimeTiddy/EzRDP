@@ -39,6 +39,28 @@ pub fn show(phone: &str, m: &Monitor, on_click: fn()) {
     }
 }
 
+/// Whether a screen point is on the banner (while it's showing).
+pub fn on_banner(x: i32, y: i32) -> bool {
+    let banner = BANNER.load(Relaxed);
+    if banner <= 0 {
+        return false;
+    }
+    let mut r = RECT::default();
+    unsafe { GetWindowRect(HWND(banner as *mut _), &mut r) }.is_ok()
+        && x >= r.left
+        && x < r.right
+        && y >= r.top
+        && y < r.bottom
+}
+
+/// The banner was clicked with the PC's own mouse.
+pub fn clicked() {
+    let f = *ON_CLICK.lock().unwrap();
+    if let Some(f) = f {
+        f();
+    }
+}
+
 /// Removes the frame and banner. Thread-safe.
 pub fn hide() {
     *STATE.lock().unwrap() = None;
@@ -86,18 +108,6 @@ unsafe extern "system" fn banner_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
                 let _ = EndPaint(hwnd, &ps);
             }
             LRESULT(0)
-        }
-        WM_LBUTTONUP => {
-            if let Some(f) = *ON_CLICK.lock().unwrap() {
-                f();
-            }
-            LRESULT(0)
-        }
-        WM_SETCURSOR => {
-            unsafe {
-                SetCursor(LoadCursorW(None, IDC_HAND).ok());
-            }
-            LRESULT(1)
         }
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_PLACE => {
@@ -194,7 +204,10 @@ fn run() {
         let make = |class, extra: WINDOW_EX_STYLE| {
             CreateWindowExW(ex | extra, class, &HSTRING::from("EzRDP"), WS_POPUP, 0, 0, 1, 1, None, None, Some(instance), None).ok()
         };
-        let Some(banner) = make(w!("EzRDPBanner"), WINDOW_EX_STYLE(0)) else { return };
+        // Clicks go through the banner: the phone can't see it (it's hidden from capture), so its
+        // taps there are meant for what's underneath. Clicks from the PC's own mouse are picked
+        // out by the tray's mouse watcher instead (see `on_banner`).
+        let Some(banner) = make(w!("EzRDPBanner"), WS_EX_TRANSPARENT) else { return };
         let _ = SetLayeredWindowAttributes(banner, COLORREF(0), 235, LWA_ALPHA);
         // Hide from screen capture (Windows 10 2004 and newer), so the phone sees the real screen.
         let _ = SetWindowDisplayAffinity(banner, WDA_EXCLUDEFROMCAPTURE);
